@@ -1,0 +1,47 @@
+# Environment and secrets
+.env
+.env.local
+*.key
+*.pem
+
+# Docker overrides
+docker-compose.override.yml
+
+# Data and caches
+data/
+*.log
+logs/
+
+# Model files (too large for git)
+models/
+*.bin
+*.safetensors
+*.gguf
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Monitoring data
+prometheus_data/
+grafana_data/
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Backup files
+*.backup
+*.bak

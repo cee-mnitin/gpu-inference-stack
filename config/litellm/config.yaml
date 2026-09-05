@@ -1,0 +1,151 @@
+model_list:
+  # ============================================================================
+  # OLLAMA MODELS
+  # ============================================================================
+  - model_name: qwen2.5-7b-ollama
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://ollama:11434
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: qwen3.6-ollama
+    litellm_params:
+      model: ollama/qwen3.6:latest
+      api_base: http://ollama:11434
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: gemma3-12b-ollama
+    litellm_params:
+      model: ollama/gemma3:12b
+      api_base: http://ollama:11434
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: granite3.3-8b-ollama
+    litellm_params:
+      model: ollama/granite3.3:8b
+      api_base: http://ollama:11434
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  # ============================================================================
+  # VLLM MODELS (OpenAI-compatible)
+  # ============================================================================
+  - model_name: qwen2.5-7b-vllm
+    litellm_params:
+      model: openai/qwen2.5-7b
+      api_base: http://vllm:8000/v1
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+      supports_parallel_function_calling: true
+
+  - model_name: qwen3.6-35b-vllm
+    litellm_params:
+      model: openai/qwen3.6
+      api_base: http://vllm:8000/v1
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+      supports_parallel_function_calling: true
+
+  # ============================================================================
+  # EMBEDDINGS
+  # ============================================================================
+  - model_name: bge-m3
+    litellm_params:
+      model: huggingface/BAAI/bge-m3
+      api_base: http://embeddings:80
+    model_info:
+      mode: embedding
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+
+# ============================================================================
+# LITELLM SETTINGS
+# ============================================================================
+litellm_settings:
+  # Enable caching
+  cache: true
+  cache_params:
+    type: redis
+    host: redis
+    port: 6379
+    ttl: 600  # Cache for 10 minutes
+
+  # Drop unsupported parameters instead of failing
+  drop_params: true
+
+  # Request settings
+  request_timeout: 600
+  num_retries: 2
+
+  # Callbacks for observability
+  success_callback: []
+  failure_callback: []
+
+  # Set moderations off
+  content_policy_fallbacks: []
+
+  # Default settings
+  default_team_settings:
+    - team_id: default
+      max_parallel_requests: 100
+      tpm_limit: 100000
+      rpm_limit: 10000
+
+# ============================================================================
+# ROUTER SETTINGS
+# ============================================================================
+router_settings:
+  # Routing strategy: simple-shuffle, least-busy, latency-based-routing
+  routing_strategy: least-busy
+
+  # Enable model fallbacks
+  enable_pre_call_checks: true
+
+  # Allowed fails before removing model from rotation
+  allowed_fails: 3
+
+  # Cooldown period (seconds) before retrying failed model
+  cooldown_time: 60
+
+  # Timeout for model health checks
+  model_group_timeout: 120
+
+# ============================================================================
+# GENERAL SETTINGS
+# ============================================================================
+general_settings:
+  # Master key for admin access (set via environment variable)
+  master_key: ${LITELLM_MASTER_KEY}
+
+  # Database for storing config/keys
+  database_url: ${DATABASE_URL}
+
+  # Enable detailed debug logs
+  # set_verbose: true
+
+  # JSON logs for easier parsing
+  json_logs: true
+
+  # Store model info in database
+  store_model_in_db: true
