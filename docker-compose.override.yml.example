@@ -1,0 +1,33 @@
+# Docker Compose Override Example
+# Copy this to docker-compose.override.yml and customize for your needs
+
+version: '3.8'
+
+services:
+  # Example: Allow LiteLLM to access native services on host
+  litellm:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Example: Custom vLLM configuration
+  # vllm:
+  #   environment:
+  #     - HF_TOKEN=your_huggingface_token
+  #   volumes:
+  #     - /path/to/local/models:/models
+
+  # Example: Expose Grafana externally
+  # grafana:
+  #   ports:
+  #     - "0.0.0.0:3000:3000"
+
+  # Example: Additional vLLM instance
+  # vllm-codellama:
+  #   extends: vllm
+  #   container_name: vllm-codellama
+  #   ports:
+  #     - "8002:8000"
+  #   command: >
+  #     --model codellama/CodeLlama-34b-Instruct-hf
+  #     --served-model-name codellama-34b
+  #     --gpu-memory-utilization 0.30

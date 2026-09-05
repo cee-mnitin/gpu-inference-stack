@@ -1,8 +1,8 @@
 model_list:
   # ============================================================================
-  # OLLAMA MODELS
+  # DOCKERIZED OLLAMA MODELS (from this stack)
   # ============================================================================
-  - model_name: qwen2.5-7b-ollama
+  - model_name: qwen2.5-7b-ollama-docker
     litellm_params:
       model: ollama/qwen2.5:7b
       api_base: http://ollama:11434
@@ -12,17 +12,7 @@ model_list:
       supports_function_calling: true
       supports_vision: false
 
-  - model_name: qwen3.6-ollama
-    litellm_params:
-      model: ollama/qwen3.6:latest
-      api_base: http://ollama:11434
-      timeout: 600
-    model_info:
-      mode: chat
-      supports_function_calling: true
-      supports_vision: false
-
-  - model_name: gemma3-12b-ollama
+  - model_name: gemma3-12b-ollama-docker
     litellm_params:
       model: ollama/gemma3:12b
       api_base: http://ollama:11434
@@ -32,10 +22,43 @@ model_list:
       supports_function_calling: true
       supports_vision: false
 
-  - model_name: granite3.3-8b-ollama
+  # ============================================================================
+  # NATIVE OLLAMA MODELS (existing server installation)
+  # ============================================================================
+  - model_name: qwen2.5-7b-ollama-native
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://host.docker.internal:11437
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: qwen3.6-ollama-native
+    litellm_params:
+      model: ollama/qwen3.6:latest
+      api_base: http://host.docker.internal:11437
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: gemma3-12b-ollama-native
+    litellm_params:
+      model: ollama/gemma3:12b
+      api_base: http://host.docker.internal:11437
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: granite3.3-8b-ollama-native
     litellm_params:
       model: ollama/granite3.3:8b
-      api_base: http://ollama:11434
+      api_base: http://host.docker.internal:11437
       timeout: 600
     model_info:
       mode: chat
@@ -43,11 +66,11 @@ model_list:
       supports_vision: false
 
   # ============================================================================
-  # VLLM MODELS (OpenAI-compatible)
+  # DOCKERIZED VLLM MODELS (from this stack)
   # ============================================================================
-  - model_name: qwen2.5-7b-vllm
+  - model_name: qwen2.5-14b-vllm-docker
     litellm_params:
-      model: openai/qwen2.5-7b
+      model: openai/qwen2.5-14b-vllm
       api_base: http://vllm:8000/v1
       timeout: 600
     model_info:
@@ -56,10 +79,13 @@ model_list:
       supports_vision: false
       supports_parallel_function_calling: true
 
-  - model_name: qwen3.6-35b-vllm
+  # ============================================================================
+  # NATIVE VLLM MODELS (existing server installation)
+  # ============================================================================
+  - model_name: qwen3.6-35b-vllm-native
     litellm_params:
       model: openai/qwen3.6
-      api_base: http://vllm:8000/v1
+      api_base: http://host.docker.internal:8000/v1
       timeout: 600
     model_info:
       mode: chat
@@ -68,16 +94,24 @@ model_list:
       supports_parallel_function_calling: true
 
   # ============================================================================
-  # EMBEDDINGS
+  # EMBEDDINGS (native services)
   # ============================================================================
-  - model_name: bge-m3
+  - model_name: bge-m3-native
     litellm_params:
       model: huggingface/BAAI/bge-m3
-      api_base: http://embeddings:80
+      api_base: http://host.docker.internal:8080
     model_info:
       mode: embedding
       input_cost_per_token: 0.0
       output_cost_per_token: 0.0
+
+  # Optional: Dockerized embeddings (if enabled)
+  # - model_name: bge-m3-docker
+  #   litellm_params:
+  #     model: huggingface/BAAI/bge-m3
+  #     api_base: http://embeddings:80
+  #   model_info:
+  #     mode: embedding
 
 # ============================================================================
 # LITELLM SETTINGS
