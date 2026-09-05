@@ -57,6 +57,7 @@ echo -e "${GREEN}✓ Data directories created${NC}"
 echo ""
 
 # Determine which profiles to enable
+# Note: redis and postgres always run (required by LiteLLM)
 PROFILES="litellm,prometheus,grafana,node-exporter,dcgm-exporter"
 
 if [ "${ENABLE_OLLAMA}" = "true" ]; then
@@ -87,8 +88,8 @@ echo -e "${GREEN}Starting services...${NC}"
 COMPOSE_PROFILES="$PROFILES" docker compose -f "$PROJECT_ROOT/docker-compose.yml" up -d
 
 echo ""
-echo "Waiting for services to be healthy..."
-sleep 10
+echo "Waiting for services to initialize (this may take 2-5 minutes for vLLM)..."
+sleep 30
 
 # Check service health
 echo ""
@@ -101,7 +102,7 @@ echo ""
 echo "Access points:"
 echo "  LiteLLM API: http://localhost:${LITELLM_PORT:-8080}/v1"
 echo "  LiteLLM UI:  http://localhost:${LITELLM_PORT:-8080}/ui"
-echo "  Grafana:     http://localhost:${GRAFANA_PORT:-3000} (admin/${GRAFANA_ADMIN_PASSWORD:-admin})"
+echo "  Grafana:     http://localhost:${GRAFANA_PORT:-3000} (admin/***)"
 echo "  Prometheus:  http://localhost:${PROMETHEUS_PORT:-9090}"
 
 if [ "${ENABLE_OLLAMA}" = "true" ]; then

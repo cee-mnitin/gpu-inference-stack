@@ -67,7 +67,20 @@ if [ "${ENABLE_EMBEDDINGS}" = "true" ]; then
 fi
 
 # Check Redis
-check_endpoint "Redis" "http://localhost:6379" 000  # Redis doesn't respond to HTTP
+echo -n "Checking Redis... "
+if docker exec redis redis-cli ping > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ OK${NC}"
+else
+    echo -e "${RED}✗ FAILED${NC}"
+fi
+
+# Check Postgres
+echo -n "Checking Postgres... "
+if docker exec postgres pg_isready -U litellm > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ OK${NC}"
+else
+    echo -e "${RED}✗ FAILED${NC}"
+fi
 
 echo ""
 echo "GPU Status:"

@@ -1,5 +1,3 @@
-version: '3.8'
-
 networks:
   gpu-inference-net:
     name: ${NETWORK_NAME:-gpu-inference-net}

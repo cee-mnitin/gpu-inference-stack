@@ -1,8 +1,6 @@
 # Docker Compose Override Example
 # Copy this to docker-compose.override.yml and customize for your needs
 
-version: '3.8'
-
 services:
   # Example: Allow LiteLLM to access native services on host
   litellm:
