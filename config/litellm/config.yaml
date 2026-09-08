@@ -1,5 +1,35 @@
 model_list:
   # ============================================================================
+  # NEW VLLM MODELS (from gpu-inference-stack - PHASE 2 PRODUCTION)
+  # Running on production ports, integrated in Docker network
+  # ============================================================================
+  - model_name: qwen3.6-new-router
+    litellm_params:
+      model: openai/qwen3.6
+      api_base: http://vllm-router-new:8080/v1
+      api_key: "EMPTY"
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+      supports_parallel_function_calling: true
+      supports_reasoning: true
+
+  - model_name: qwen3.6-new-direct
+    litellm_params:
+      model: openai/qwen3.6
+      api_base: http://vllm-new:8000/v1
+      api_key: "EMPTY"
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+      supports_parallel_function_calling: true
+      supports_reasoning: true
+
+  # ============================================================================
   # DOCKERIZED OLLAMA MODELS (from this stack)
   # ============================================================================
   - model_name: qwen2.5-7b-ollama-docker
@@ -72,6 +102,7 @@ model_list:
     litellm_params:
       model: openai/qwen2.5-14b-vllm
       api_base: http://vllm:8000/v1
+      api_key: "EMPTY"
       timeout: 600
     model_info:
       mode: chat
@@ -80,12 +111,27 @@ model_list:
       supports_parallel_function_calling: true
 
   # ============================================================================
-  # NATIVE VLLM MODELS (existing server installation)
+  # EXISTING VLLM INFRASTRUCTURE (Docker containers with router)
   # ============================================================================
-  - model_name: qwen3.6-35b-vllm-native
+  # Router provides model-aware routing to vLLM backends
+  - model_name: qwen3.6-vllm-router
     litellm_params:
       model: openai/qwen3.6
-      api_base: http://host.docker.internal:8000/v1
+      api_base: http://host.docker.internal:11500/v1
+      api_key: "EMPTY"
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+      supports_parallel_function_calling: true
+
+  # Direct access to vLLM container (bypass router)
+  - model_name: qwen3.6-vllm-direct
+    litellm_params:
+      model: openai/qwen3.6
+      api_base: http://host.docker.internal:11502/v1
+      api_key: "EMPTY"
       timeout: 600
     model_info:
       mode: chat
@@ -170,10 +216,8 @@ router_settings:
 # ============================================================================
 general_settings:
   # Master key for admin access (set via environment variable)
-  master_key: ${LITELLM_MASTER_KEY}
-
-  # Database for storing config/keys
-  database_url: ${DATABASE_URL}
+  # Database URL and master key are read from environment variables
+  # DATABASE_URL and LITELLM_MASTER_KEY
 
   # Enable detailed debug logs
   # set_verbose: true

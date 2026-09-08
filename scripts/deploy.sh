@@ -52,7 +52,8 @@ echo ""
 # Create data directories
 echo "Creating data directories..."
 mkdir -p "$PROJECT_ROOT/data"/{ollama/models,vllm/cache,huggingface,prometheus,grafana,postgres}
-chmod -R 755 "$PROJECT_ROOT/data"
+# Try to set permissions, ignore errors for directories owned by Docker
+chmod -R 755 "$PROJECT_ROOT/data" 2>/dev/null || true
 echo -e "${GREEN}✓ Data directories created${NC}"
 echo ""
 
