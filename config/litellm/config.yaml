@@ -1,4 +1,134 @@
 model_list:
+  # ==========================================================================
+  # EMBER CONTRACT ALIASES  —  gpu/<task>/<role>
+  # ==========================================================================
+  # THE CONSUMER-FACING SURFACE OF THIS STACK. Consumers (ember-ai and any
+  # other client) address ONLY these names. Everything below this block is
+  # this box's internal topology and may be renamed, re-pointed, or removed
+  # freely; these six names may not.
+  #
+  # The contract is a set of ROLES, and each box fills each role with whatever
+  # weights it can actually run. A 96 GB box puts Qwen3.6-35B behind
+  # gpu/chat/interactive; a 32 GB box puts Qwen3-30B-A3B there. The consumer's
+  # config does not change, which is the entire point: consumers select a
+  # capability tier, deployments select the weights.
+  #
+  # Role-named env vars are correct HERE and wrong on the consumer side. This
+  # is the layer that decides "role X is served by model Y at backend Z", so
+  # the role belongs in the variable name. A consumer's variables name SERVERS
+  # (GPU_<SERVER>_URL), never tasks — it addresses infrastructure, not roles.
+  #
+  # ┌──────────────────────────────┬──────────────────────────────────────────┐
+  # │ alias                        │ what a box promises by publishing it     │
+  # ├──────────────────────────────┼──────────────────────────────────────────┤
+  # │ gpu/chat/interactive         │ tool-calling, >=32k ctx, JSON            │
+  # │                              │ response_format, latency-tuned           │
+  # │ gpu/chat/bulk                │ tool-calling, >=32k ctx, JSON            │
+  # │                              │ response_format, throughput-tuned        │
+  # │ gpu/chat/fast                │ tool-calling, >=16k ctx, low latency     │
+  # │ gpu/chat/vision              │ image input (OPTIONAL)                   │
+  # │ gpu/embed/bge-m3             │ BAAI/bge-m3 exactly, 1024-dim            │
+  # │ gpu/rerank/bge-reranker-v2-m3│ BAAI/bge-reranker-v2-m3 cross-encoder    │
+  # └──────────────────────────────┴──────────────────────────────────────────┘
+  #
+  # The two embed/rerank rows name a MODEL, not a role, deliberately. A vector
+  # index is built with one specific embedder and cannot be re-pointed at a
+  # different one without re-embedding the corpus — and a same-dimension
+  # substitute does NOT error, it silently returns wrong neighbours. Those two
+  # are a data contract; the chat rows are a capability contract.
+  #
+  # `interactive` and `bulk` MAY point at the same deployment (the default
+  # below does). They are separate names so a consumer can place them on
+  # different servers — interactive chat on a big shared box, bulk extraction
+  # on a local one — without either side editing YAML.
+  #
+  # Fill the roles from .env; see .env.example's "EMBER CONTRACT" section.
+
+  - model_name: gpu/chat/interactive
+    litellm_params:
+      model: os.environ/CONTRACT_INTERACTIVE_MODEL
+      api_base: os.environ/CONTRACT_INTERACTIVE_API_BASE
+      api_key: "EMPTY"
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_parallel_function_calling: true
+      supports_vision: false
+
+  - model_name: gpu/chat/bulk
+    litellm_params:
+      model: os.environ/CONTRACT_BULK_MODEL
+      api_base: os.environ/CONTRACT_BULK_API_BASE
+      api_key: "EMPTY"
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_parallel_function_calling: true
+      supports_vision: false
+
+  - model_name: gpu/chat/fast
+    litellm_params:
+      model: os.environ/CONTRACT_FAST_MODEL
+      api_base: os.environ/CONTRACT_FAST_API_BASE
+      api_key: "EMPTY"
+      # Deliberately shorter than the 600s above: this role exists for
+      # latency-sensitive calls, so a slow response is a failure, not a wait.
+      timeout: 60
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  # OPTIONAL. Publish only if this box actually serves a vision-capable model.
+  # A consumer that cannot find this alias routes vision to a cloud provider
+  # instead, so leaving it unserved degrades cleanly. Backed by Ollama by
+  # default rather than vLLM: the VL model is a secondary, low-volume model and
+  # Ollama can swap it in and out without taking VRAM from the chat model.
+  - model_name: gpu/chat/vision
+    litellm_params:
+      model: os.environ/CONTRACT_VISION_MODEL
+      api_base: os.environ/CONTRACT_VISION_API_BASE
+      timeout: 300
+      # Vision calls are expensive and a blind retry doubles the cost of a
+      # genuinely bad image. Per-deployment override of router num_retries.
+      num_retries: 0
+    model_info:
+      mode: chat
+      supports_vision: true
+
+  - model_name: gpu/embed/bge-m3
+    litellm_params:
+      model: infinity/BAAI/bge-m3
+      api_base: os.environ/CONTRACT_EMBED_API_BASE
+      api_key: "EMPTY"
+      timeout: 600   # batch embedding of a large document set takes minutes
+    model_info:
+      mode: embedding
+
+  - model_name: gpu/rerank/bge-reranker-v2-m3
+    litellm_params:
+      model: infinity/BAAI/bge-reranker-v2-m3
+      api_base: os.environ/CONTRACT_RERANK_API_BASE
+      api_key: "EMPTY"
+      timeout: 600
+    model_info:
+      mode: rerank
+
+  # OPTIONAL document-OCR VLM. Requires a vLLM started with
+  # --model PaddlePaddle/PaddleOCR-VL on a separate container/GPU from the
+  # chat model. Uncomment on a box that actually runs it.
+  # - model_name: gpu/ocr/paddleocr-vl
+  #   litellm_params:
+  #     model: openai/PaddlePaddle/PaddleOCR-VL
+  #     api_base: os.environ/CONTRACT_OCR_API_BASE
+  #     api_key: "EMPTY"
+  #     timeout: 300
+
+  # ==========================================================================
+  # INTERNAL TOPOLOGY BELOW — not part of any consumer contract
+  # ==========================================================================
   # ============================================================================
   # NEW VLLM MODELS (from gpu-inference-stack - PHASE 2 PRODUCTION)
   # Running on production ports, integrated in Docker network
@@ -163,20 +293,43 @@ model_list:
 # LITELLM SETTINGS
 # ============================================================================
 litellm_settings:
-  # Enable caching
-  cache: true
+  # ── Response cache: OFF ────────────────────────────────────────────────
+  # Was `cache: true` with a 600s Redis TTL. Turned off when this stack became
+  # shared infrastructure behind consumer gateways:
+  #   1. A response cache on a SHARED inference gateway serves one consumer's
+  #      answer to another. Two clients sending the same prompt are not
+  #      necessarily asking the same question.
+  #   2. It makes bulk extraction runs non-reproducible in a way that looks
+  #      like model nondeterminism — a stale answer from a prior run is
+  #      indistinguishable from a fresh one, for 10 minutes.
+  # Caching belongs in the consumer's own gateway, where it knows the call's
+  # semantics. Redis stays up: LiteLLM uses it for router state and rate
+  # limiting, not only for response caching.
+  cache: false
   cache_params:
     type: redis
     host: redis
     port: 6379
-    ttl: 600  # Cache for 10 minutes
+    ttl: 600
 
-  # Drop unsupported parameters instead of failing
+  # Drop provider-unsupported request params instead of 400ing. Consumers send
+  # OpenAI-shaped params that individual backends reject (encoding_format on
+  # embeddings, etc.); normalising here keeps a heterogeneous backend set
+  # behind one API.
   drop_params: true
 
-  # Request settings
   request_timeout: 600
-  num_retries: 2
+  # ── Retries: ZERO, by design ───────────────────────────────────────────
+  # Retries must live in exactly ONE tier. A consumer gateway that retries
+  # twice against a stack that retries twice turns one logical call into up to
+  # nine upstream hits, and the consumer cannot tell a slow backend from a
+  # retry storm it caused. The consumer's tier is the right one to own this:
+  # it is the tier that can fail a call over to a different provider entirely,
+  # which this stack cannot do.
+  #
+  # `allowed_fails` / `cooldown_time` in router_settings still apply — taking a
+  # dead deployment out of rotation is health management, not retrying.
+  num_retries: 0
 
   # Callbacks for observability
   success_callback: []
@@ -198,6 +351,13 @@ litellm_settings:
 router_settings:
   # Routing strategy: simple-shuffle, least-busy, latency-based-routing
   routing_strategy: least-busy
+
+  # No `fallbacks:` block, deliberately. Cross-provider fallback is the
+  # consumer gateway's job — it holds the cloud credentials and the policy
+  # about when spending money is preferable to failing. A GPU box silently
+  # redirecting a call it cannot serve would bill an API the consumer thought
+  # was unused.
+  num_retries: 0
 
   # Enable model fallbacks
   enable_pre_call_checks: true

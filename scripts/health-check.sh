@@ -61,9 +61,14 @@ if [ "${ENABLE_VLLM}" = "true" ]; then
     check_endpoint "vLLM" "http://localhost:${VLLM_PORT:-8000}/health"
 fi
 
-# Check Embeddings if enabled
+# Check Infinity if enabled (contract embed + rerank roles)
+if [ "${ENABLE_INFINITY:-true}" = "true" ]; then
+    check_endpoint "Infinity" "http://localhost:${INFINITY_PORT:-7997}/health"
+fi
+
+# Check Embeddings (TEI) if enabled
 if [ "${ENABLE_EMBEDDINGS}" = "true" ]; then
-    check_endpoint "Embeddings" "http://localhost:${EMBEDDINGS_PORT:-8082}/health"
+    check_endpoint "Embeddings (TEI)" "http://localhost:${EMBEDDINGS_PORT:-8082}/health"
 fi
 
 # Check Redis
@@ -80,6 +85,43 @@ if docker exec postgres pg_isready -U litellm > /dev/null 2>&1; then
     echo -e "${GREEN}✓ OK${NC}"
 else
     echo -e "${RED}✗ FAILED${NC}"
+fi
+
+# ============================================================================
+# EMBER CONTRACT CHECK
+# ============================================================================
+# The aliases below are what consumers actually address. A backend can be
+# healthy while the alias in front of it is misconfigured (wrong served-model
+# name, wrong api_base, unresolved env var), so probe the NAMES, not just the
+# services. This is the same check consumers run at their own boot; running it
+# here means the box can prove it honours the contract before anyone points a
+# consumer at it.
+echo ""
+echo "Ember contract aliases (what consumers address):"
+_served=$(curl -s -m 10 -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
+    "http://localhost:${LITELLM_PORT:-8080}/v1/models" 2>/dev/null \
+    | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
+
+if [ -z "$_served" ]; then
+    echo -e "  ${RED}✗ could not list models — is LiteLLM up and is LITELLM_MASTER_KEY set?${NC}"
+else
+    # Required roles: a consumer cannot run its text or retrieval plane
+    # without these. Optional roles degrade to a cloud provider instead.
+    for _alias in gpu/chat/interactive gpu/chat/bulk gpu/chat/fast \
+                  gpu/embed/bge-m3 gpu/rerank/bge-reranker-v2-m3; do
+        if echo "$_served" | grep -qx "$_alias"; then
+            echo -e "  ${GREEN}✓${NC} $_alias"
+        else
+            echo -e "  ${RED}✗ $_alias  (REQUIRED — consumers will refuse to boot)${NC}"
+        fi
+    done
+    for _alias in gpu/chat/vision gpu/ocr/paddleocr-vl; do
+        if echo "$_served" | grep -qx "$_alias"; then
+            echo -e "  ${GREEN}✓${NC} $_alias ${YELLOW}(optional)${NC}"
+        else
+            echo -e "  ${YELLOW}-${NC} $_alias ${YELLOW}(optional, not served — consumers route this to cloud)${NC}"
+        fi
+    done
 fi
 
 echo ""
