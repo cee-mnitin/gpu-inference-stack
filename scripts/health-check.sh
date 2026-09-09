@@ -105,8 +105,12 @@ _served=$(curl -s -m 10 -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
 if [ -z "$_served" ]; then
     echo -e "  ${RED}✗ could not list models — is LiteLLM up and is LITELLM_MASTER_KEY set?${NC}"
 else
-    # Required roles: a consumer cannot run its text or retrieval plane
-    # without these. Optional roles degrade to a cloud provider instead.
+    # Required roles: no consumer can run its text or retrieval plane without
+    # these. The "optional" roles below are optional for a BOX to publish, not
+    # optional for a consumer that routes a category here — nothing falls back,
+    # so a consumer pointed at an unserved role fails that category. Leaving
+    # one unserved is fine; the consumer must then use a preset that routes
+    # that category elsewhere (ember: `gpu_cloud_vision`).
     for _alias in gpu/chat/interactive gpu/chat/bulk gpu/chat/fast \
                   gpu/embed/bge-m3 gpu/rerank/bge-reranker-v2-m3; do
         if echo "$_served" | grep -qx "$_alias"; then
@@ -119,7 +123,7 @@ else
         if echo "$_served" | grep -qx "$_alias"; then
             echo -e "  ${GREEN}✓${NC} $_alias ${YELLOW}(optional)${NC}"
         else
-            echo -e "  ${YELLOW}-${NC} $_alias ${YELLOW}(optional, not served — consumers route this to cloud)${NC}"
+            echo -e "  ${YELLOW}-${NC} $_alias ${YELLOW}(not served — consumers must route this category elsewhere, e.g. ember preset gpu_cloud_vision)${NC}"
         fi
     done
 fi
