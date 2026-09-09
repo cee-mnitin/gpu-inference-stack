@@ -61,6 +61,21 @@ something that half-works. Consumers check `/v1/models` at boot: they route
 around a missing optional role (vision falls back to a cloud provider) and
 refuse to start on a missing required one.
 
+### How consumers address this stack
+
+A consumer points one variable per server at the **bare root** of this stack's
+LiteLLM — `http://<this host>:8080` — with **no `/v1` and no path**, plus a
+virtual key. For ember-ai that is `GPU_STACK_URL` / `GPU_STACK_KEY` in its
+`.env.local`, then `make check-llm`.
+
+The bare root matters, and is worth repeating to anyone integrating: it is what
+lets a consumer use one variable and one LiteLLM provider prefix for all three
+call types, because this proxy serves `/chat/completions`, `/embeddings` and
+`/v1/rerank` (LiteLLM's rerank client appends that `/v1` itself). A base ending
+in `/v1` still works for chat and embeddings — so the integration looks
+healthy — and breaks only rerank, which degrades the consumer's retrieval to
+un-reranked order rather than raising.
+
 ### Verifying
 
 `./scripts/health-check.sh` probes the alias *names*, not just the backing
