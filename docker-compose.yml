@@ -192,6 +192,68 @@ services:
         max-file: "${MAX_LOG_FILES:-5}"
 
   # ============================================================================
+  # INFINITY - Embeddings + Reranking (single container, both models)
+  # ============================================================================
+  # Serves the two models ember-ai's retrieval plane is built on:
+  #   BAAI/bge-m3               → gpu/embed/bge-m3            (1024-dim)
+  #   BAAI/bge-reranker-v2-m3   → gpu/rerank/bge-reranker-v2-m3 (cross-encoder)
+  #
+  # Why Infinity and not the `embeddings` (TEI) service above:
+  #   1. TEI serves ONE model per container, and has no reranker wired here at
+  #      all — a cross-encoder would need a second TEI instance. Infinity serves
+  #      both from one process, and LiteLLM has an `infinity` provider for both
+  #      the embedding and the rerank mode.
+  #   2. Embedding vectors are DATA, not a preference. A consumer's vector index
+  #      is built with a specific embedder; "same weights, different server
+  #      build" is not a guarantee of identical vectors (pooling/normalisation
+  #      can differ between runtimes). ember-ai's corpus was embedded through
+  #      Infinity bge-m3, so serving it through Infinity keeps the vector space
+  #      bit-identical. Re-pointing embeddings at TEI is a re-index, not a
+  #      config change.
+  #
+  # BOTH --model-id flags are mandatory. An Infinity loaded in embed-only mode
+  # returns 400 on /rerank — a real failure mode that silently degrades a
+  # consumer's retrieval to un-reranked fusion order rather than erroring
+  # loudly.
+  infinity:
+    image: michaelf34/infinity:0.0.77
+    container_name: infinity
+    profiles:
+      - infinity
+    restart: unless-stopped
+    ports:
+      - "${INFINITY_PORT:-7997}:7997"
+    command: ${INFINITY_CMD:-v2 --model-id BAAI/bge-m3 --model-id BAAI/bge-reranker-v2-m3 --port 7997}
+    volumes:
+      # HF_HOME inside the image is /app/.cache/huggingface. Mounting anywhere
+      # else re-downloads ~13 GB of weights on every restart.
+      - ${HF_HOME:-./data/huggingface}:/app/.cache/huggingface
+    environment:
+      - INFINITY_QUEUE_SIZE=${INFINITY_QUEUE_SIZE:-512}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${GPU_DEVICES:-0}']
+              capabilities: [gpu]
+    networks:
+      - gpu-inference-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Warm cache: 60-120s to load + warm both models. First-ever boot
+      # downloads ~13 GB and takes ~7 min.
+      start_period: 600s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "${MAX_LOG_SIZE:-100m}"
+        max-file: "${MAX_LOG_FILES:-5}"
+
+  # ============================================================================
   # REDIS - Caching Layer for LiteLLM
   # ============================================================================
   redis:
@@ -229,9 +291,15 @@ services:
     container_name: litellm
     restart: unless-stopped
     ports:
-      - "${LITELLM_PORT:-8080}:4000"
+      # Consumers reach this over LAN/Netbird, so it cannot be loopback-only.
+      # Pin LITELLM_BIND_ADDR to the Netbird or LAN interface (e.g.
+      # 100.117.227.85) to keep the gateway off every other interface on the
+      # box; 0.0.0.0 exposes it on all of them.
+      - "${LITELLM_BIND_ADDR:-0.0.0.0}:${LITELLM_PORT:-8080}:4000"
     volumes:
-      - ./config/litellm:/app/config
+      # Read-only: the container has no reason to rewrite its own config, and
+      # this gateway is reachable from other hosts.
+      - ./config/litellm:/app/config:ro
     environment:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-1234567890abcdef}
       - DATABASE_URL=postgresql://litellm:litellm@postgres:5432/litellm
@@ -240,6 +308,26 @@ services:
       - REQUEST_TIMEOUT=${LITELLM_REQUEST_TIMEOUT:-600}
       - REDIS_HOST=${LITELLM_REDIS_HOST:-redis}
       - REDIS_PORT=${LITELLM_REDIS_PORT:-6379}
+      # ── Ember contract role bindings ──────────────────────────────────
+      # Which model/backend on THIS box fills each gpu/<task>/<role> alias
+      # (see the contract block at the top of config/litellm/config.yaml).
+      # Override any of these in .env to re-fill a role without editing YAML.
+      # Defaults: chat roles → the local vLLM, vision → local Ollama,
+      # embed/rerank → the local Infinity.
+      - CONTRACT_INTERACTIVE_MODEL=${CONTRACT_INTERACTIVE_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
+      - CONTRACT_INTERACTIVE_API_BASE=${CONTRACT_INTERACTIVE_API_BASE:-http://vllm:8000/v1}
+      # `bulk` defaults to the SAME deployment as `interactive`. They are
+      # separate aliases so a consumer can place them on different servers,
+      # not because a box must serve two chat models.
+      - CONTRACT_BULK_MODEL=${CONTRACT_BULK_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
+      - CONTRACT_BULK_API_BASE=${CONTRACT_BULK_API_BASE:-http://vllm:8000/v1}
+      - CONTRACT_FAST_MODEL=${CONTRACT_FAST_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
+      - CONTRACT_FAST_API_BASE=${CONTRACT_FAST_API_BASE:-http://vllm:8000/v1}
+      - CONTRACT_VISION_MODEL=${CONTRACT_VISION_MODEL:-ollama/${OLLAMA_VISION_MODEL:-gemma3:12b}}
+      - CONTRACT_VISION_API_BASE=${CONTRACT_VISION_API_BASE:-http://ollama:11434}
+      - CONTRACT_EMBED_API_BASE=${CONTRACT_EMBED_API_BASE:-http://infinity:7997}
+      - CONTRACT_RERANK_API_BASE=${CONTRACT_RERANK_API_BASE:-http://infinity:7997}
+      - CONTRACT_OCR_API_BASE=${CONTRACT_OCR_API_BASE:-http://vllm:8000/v1}
     command: --config /app/config/config.yaml --port 4000 --detailed_debug
     depends_on:
       redis:

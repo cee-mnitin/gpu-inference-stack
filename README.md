@@ -12,6 +12,94 @@ A production-ready, modular GPU inference platform for running multiple LLM serv
 - **Production Ready**: Health checks, logging, resource limits
 - **Easy Deployment**: Docker Compose with automated scripts
 
+## The consumer contract (`gpu/<task>/<role>`)
+
+Consumers — ember-ai and any other client — address **only** these aliases.
+Everything else in `config/litellm/config.yaml` is this box's internal topology
+and may be renamed or re-pointed freely.
+
+| alias | what publishing it promises | required |
+|---|---|---|
+| `gpu/chat/interactive` | tool-calling, ≥32k ctx, JSON `response_format`, latency-tuned | yes |
+| `gpu/chat/bulk` | tool-calling, ≥32k ctx, JSON `response_format`, throughput-tuned | yes |
+| `gpu/chat/fast` | tool-calling, ≥16k ctx, low latency | yes |
+| `gpu/chat/vision` | image input | optional |
+| `gpu/embed/bge-m3` | `BAAI/bge-m3` exactly, 1024-dim | yes |
+| `gpu/rerank/bge-reranker-v2-m3` | `BAAI/bge-reranker-v2-m3` cross-encoder | optional |
+
+The contract is a set of **roles**, and each box fills each role with whatever
+weights it can run — a 96GB box serves Qwen3.6-35B behind
+`gpu/chat/interactive`, a 32GB box serves Qwen3-30B-A3B. The consumer's config
+does not change. That is the whole point: **consumers choose a capability tier,
+deployments choose the weights.**
+
+The two embed/rerank rows name a *model* rather than a role, deliberately. A
+vector index is built with one specific embedder and cannot be re-pointed at a
+different one without re-embedding the corpus — and a same-dimension substitute
+does not error, it silently returns wrong neighbours. Those two are a **data**
+contract; the chat rows are a **capability** contract.
+
+`interactive` and `bulk` default to the same deployment. They are separate
+names so a consumer can place them on different servers — interactive chat on a
+big shared box, bulk extraction on a local one — without either side editing
+YAML.
+
+### Filling the roles
+
+Each role binds to a model + backend through `CONTRACT_*` variables in `.env`
+(see the `EMBER CONTRACT` section of `.env.example`). Defaults: chat roles →
+the local vLLM, vision → local Ollama, embed/rerank → local Infinity.
+
+Role-named variables are correct *here* and wrong on the consumer side. This is
+the layer that decides "role X is served by model Y at backend Z", so the role
+belongs in the name. A consumer's variables name **servers**
+(`GPU_<SERVER>_URL`), never tasks — it is addressing infrastructure, not
+choosing roles.
+
+A role you cannot serve should be left **unserved** rather than pointed at
+something that half-works. Consumers check `/v1/models` at boot: they route
+around a missing optional role (vision falls back to a cloud provider) and
+refuse to start on a missing required one.
+
+### How consumers address this stack
+
+A consumer points one variable per server at the **bare root** of this stack's
+LiteLLM — `http://<this host>:8080` — with **no `/v1` and no path**, plus a
+virtual key. For ember-ai that is `GPU_STACK_URL` / `GPU_STACK_KEY` in its
+`.env.local`, then `make check-llm`.
+
+The bare root matters, and is worth repeating to anyone integrating: it is what
+lets a consumer use one variable and one LiteLLM provider prefix for all three
+call types, because this proxy serves `/chat/completions`, `/embeddings` and
+`/v1/rerank` (LiteLLM's rerank client appends that `/v1` itself). A base ending
+in `/v1` still works for chat and embeddings — so the integration looks
+healthy — and breaks only rerank, which degrades the consumer's retrieval to
+un-reranked order rather than raising.
+
+### Verifying
+
+`./scripts/health-check.sh` probes the alias *names*, not just the backing
+services — a backend can be healthy while the alias in front of it is
+misconfigured (wrong served-model name, unresolved env var). Run it before
+pointing a consumer at a new box.
+
+### Keys
+
+Do not give consumers `LITELLM_MASTER_KEY`; it is an admin credential. Mint a
+virtual key per consuming app instead, so each gets its own spend tracking,
+rate limit, and revocation — see `.env.example` for the `/key/generate` call.
+
+### Retries and caching live in the consumer
+
+This stack sets `num_retries: 0` and `cache: false`, deliberately. Retries must
+live in exactly one tier: a consumer that retries twice against a stack that
+retries twice turns one logical call into up to nine upstream hits. The
+consumer's gateway is the right owner because it is the tier that can fail a
+call over to a different provider entirely, which this stack cannot. Response
+caching is off because a cache on *shared* inference serves one consumer's
+answer to another, and makes bulk runs non-reproducible in a way that looks
+like model nondeterminism.
+
 ## Architecture
 
 ```

@@ -71,9 +71,16 @@ if [ "${ENABLE_VLLM}" = "true" ]; then
     echo "Enabling vLLM..."
 fi
 
+# Infinity serves the contract's embed + rerank roles. Defaults ON: a stack
+# with no embedder cannot serve a consumer's retrieval plane at all.
+if [ "${ENABLE_INFINITY:-true}" = "true" ]; then
+    PROFILES="$PROFILES,infinity"
+    echo "Enabling Infinity (embeddings + reranking)..."
+fi
+
 if [ "${ENABLE_EMBEDDINGS}" = "true" ]; then
     PROFILES="$PROFILES,embeddings"
-    echo "Enabling Text Embeddings..."
+    echo "Enabling Text Embeddings (TEI)..."
 fi
 
 echo ""
