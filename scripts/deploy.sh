@@ -28,6 +28,54 @@ fi
 # Load environment variables
 source "$PROJECT_ROOT/.env"
 
+# ---------------------------------------------------------------------------
+# ENGINE EXCLUSIVITY  —  vLLM and llama.cpp cannot share a GPU here.
+#
+# This box's llama.cpp weights are 33.19 GiB of 48 GB; the Blackwell box's
+# Flash-Next is 76.3 GiB of 97 GB. vLLM wants ~31 GB on top of either, so
+# neither fits. And two engines contending for one card does not fail
+# cleanly — it OOMs mid-request or thrashes, which reaches a consumer as
+# intermittent 5xx and timeouts rather than as a configuration error.
+# So refuse here, loudly, at deploy time.
+#
+# This runs BEFORE the Docker prerequisite check on purpose: a config that
+# can never work should be rejected without touching the daemon.
+#
+# A genuinely multi-GPU box that has pinned the two engines to different
+# devices (GPU_DEVICES vs LLAMACPP_GPU_DEVICES) can override.
+# ---------------------------------------------------------------------------
+if [ "${ENABLE_VLLM}" = "true" ] && [ "${ENABLE_LLAMACPP}" = "true" ]; then
+    if [ "${ALLOW_VLLM_LLAMACPP_COTENANCY:-0}" != "1" ]; then
+        echo -e "${RED}Error: ENABLE_VLLM and ENABLE_LLAMACPP are both true.${NC}"
+        echo ""
+        echo "  These engines are mutually exclusive on a single GPU. Enable the"
+        echo "  one this box is meant to serve and disable the other:"
+        echo ""
+        echo "    vLLM       ->  ENABLE_VLLM=true   ENABLE_LLAMACPP=false"
+        echo "    llama.cpp  ->  ENABLE_VLLM=false  ENABLE_LLAMACPP=true"
+        echo ""
+        echo "  If this box has more than one GPU and you have pinned them to"
+        echo "  different devices (GPU_DEVICES vs LLAMACPP_GPU_DEVICES), set"
+        echo "  ALLOW_VLLM_LLAMACPP_COTENANCY=1 to proceed."
+        exit 1
+    fi
+    echo -e "${YELLOW}Warning: running vLLM and llama.cpp together (cotenancy override set).${NC}"
+    echo "  GPU_DEVICES=${GPU_DEVICES:-0}  LLAMACPP_GPU_DEVICES=${LLAMACPP_GPU_DEVICES:-${GPU_DEVICES:-0}}"
+    echo "  Both engines will attempt to reserve VRAM. Verify with nvidia-smi."
+fi
+
+# A box with no chat engine cannot serve gpu/chat/interactive, /bulk or /fast —
+# all three of which are REQUIRED contract roles. Warn rather than fail: an
+# embed/rerank-only box is a legitimate deployment, and so is a box being
+# brought up in stages.
+if [ "${ENABLE_VLLM}" != "true" ] && [ "${ENABLE_LLAMACPP}" != "true" ]; then
+    echo -e "${YELLOW}Warning: neither vLLM nor llama.cpp is enabled.${NC}"
+    echo "  The required gpu/chat/* contract roles will be UNSERVED, and"
+    echo "  scripts/health-check.sh will report contract failures. A consumer"
+    echo "  pointed at this box will refuse to start."
+    echo ""
+fi
+
 echo "Configuration:"
 echo "  Server Name: ${SERVER_NAME:-gpu-server-1}"
 echo "  Server Profile: ${SERVER_PROFILE:-default}"
@@ -51,7 +99,7 @@ echo ""
 
 # Create data directories
 echo "Creating data directories..."
-mkdir -p "$PROJECT_ROOT/data"/{ollama/models,vllm/cache,huggingface,prometheus,grafana,postgres}
+mkdir -p "$PROJECT_ROOT/data"/{ollama/models,vllm/cache,llamacpp/models,huggingface,prometheus,grafana,postgres}
 # Try to set permissions, ignore errors for directories owned by Docker
 chmod -R 755 "$PROJECT_ROOT/data" 2>/dev/null || true
 echo -e "${GREEN}✓ Data directories created${NC}"
@@ -71,6 +119,13 @@ if [ "${ENABLE_VLLM}" = "true" ]; then
     echo "Enabling vLLM..."
 fi
 
+# llama.cpp — the alternative chat engine. Exclusivity with vLLM was already
+# enforced above, so at most one of these two branches can be taken.
+if [ "${ENABLE_LLAMACPP}" = "true" ]; then
+    PROFILES="$PROFILES,llamacpp"
+    echo "Enabling llama.cpp..."
+fi
+
 # Infinity serves the contract's embed + rerank roles. Defaults ON: a stack
 # with no embedder cannot serve a consumer's retrieval plane at all.
 if [ "${ENABLE_INFINITY:-true}" = "true" ]; then
@@ -86,6 +141,53 @@ fi
 echo ""
 echo "Active profiles: $PROFILES"
 echo ""
+
+# ---------------------------------------------------------------------------
+# CONTRACT / BACKEND CONSISTENCY
+#
+# A contract alias whose backend is not running is WORSE than an absent one.
+# LiteLLM publishes every alias in config.yaml regardless of whether its
+# api_base answers, so:
+#   - /v1/models lists the role
+#   - a consumer's boot check sees it and assumes the role is available
+#   - every real call then 500s ("Cannot connect to host ollama:11434")
+#
+# "Unserved" and "published but broken" are opposite states that look
+# identical from outside, which is the same trap as the Pillow and no-curl
+# bugs this repo has already fixed. Catch it here instead.
+#
+# Truly unserving an OPTIONAL role needs the alias commented out of
+# config/litellm/config.yaml as well — .env alone cannot remove it.
+_contract_warn=0
+_check_backend() {
+    # $1 = role label, $2 = that role's api_base, $3 = host substring,
+    # $4 = whether its service is enabled
+    case "$2" in
+        *"$3"*)
+            if [ "$4" != "true" ]; then
+                [ "$_contract_warn" = "0" ] && echo -e "${YELLOW}Warning: contract roles point at disabled backends.${NC}"
+                _contract_warn=1
+                echo "  $1 -> $3, but that service is not enabled."
+            fi
+            ;;
+    esac
+}
+_check_backend "gpu/chat/vision"  "${CONTRACT_VISION_API_BASE:-http://ollama:11434}"  "ollama"   "${ENABLE_OLLAMA}"
+_check_backend "gpu/embed/bge-m3" "${CONTRACT_EMBED_API_BASE:-http://infinity:7997}"  "infinity" "${ENABLE_INFINITY:-true}"
+_check_backend "gpu/rerank/*"     "${CONTRACT_RERANK_API_BASE:-http://infinity:7997}" "infinity" "${ENABLE_INFINITY:-true}"
+for _role in INTERACTIVE BULK FAST; do
+    eval "_base=\${CONTRACT_${_role}_API_BASE:-http://vllm:8000/v1}"
+    _check_backend "gpu/chat/$(echo "$_role" | tr 'A-Z' 'a-z')" "$_base" "vllm"     "${ENABLE_VLLM}"
+    _check_backend "gpu/chat/$(echo "$_role" | tr 'A-Z' 'a-z')" "$_base" "llamacpp" "${ENABLE_LLAMACPP}"
+done
+if [ "$_contract_warn" = "1" ]; then
+    echo ""
+    echo "  For an OPTIONAL role (vision, ocr) also comment out its block in"
+    echo "  config/litellm/config.yaml — otherwise the alias stays published in"
+    echo "  /v1/models and consumers will route to it and get 500s."
+    echo "  For a REQUIRED role, enable the backend instead."
+    echo ""
+fi
 
 # Pull images.
 # --ignore-buildable: litellm is built from config/litellm/Dockerfile (it needs
@@ -150,9 +252,17 @@ docker compose -f "$PROJECT_ROOT/docker-compose.yml" ps
 echo ""
 echo -e "${GREEN}Deployment complete!${NC}"
 echo ""
+# Print the address LiteLLM is ACTUALLY on. `localhost` is wrong wherever
+# LITELLM_BIND_ADDR is pinned — and on a box where something else holds :8080
+# (which is why it gets pinned) the printed URL points at that other service.
+# Handing someone a URL that resolves to a different app is worse than
+# printing nothing. 0.0.0.0 and [::] do include loopback, so those stay.
+_addr="${LITELLM_BIND_ADDR:-localhost}"
+case "$_addr" in ""|0.0.0.0|"[::]"|"::") _addr="localhost" ;; esac
+
 echo "Access points:"
-echo "  LiteLLM API: http://localhost:${LITELLM_PORT:-8080}/v1"
-echo "  LiteLLM UI:  http://localhost:${LITELLM_PORT:-8080}/ui"
+echo "  LiteLLM API: http://${_addr}:${LITELLM_PORT:-8080}/v1"
+echo "  LiteLLM UI:  http://${_addr}:${LITELLM_PORT:-8080}/ui"
 echo "  Grafana:     http://localhost:${GRAFANA_PORT:-3000} (admin/***)"
 echo "  Prometheus:  http://localhost:${PROMETHEUS_PORT:-9090}"
 
@@ -162,6 +272,12 @@ fi
 
 if [ "${ENABLE_VLLM}" = "true" ]; then
     echo "  vLLM:        http://localhost:${VLLM_PORT:-8000}"
+fi
+
+if [ "${ENABLE_LLAMACPP}" = "true" ]; then
+    # Loopback by default and deliberately — llama-server has no auth. This is
+    # for local debugging and scripts/benchmark.sh --direct, not for consumers.
+    echo "  llama.cpp:   http://${LLAMACPP_BIND_ADDR:-127.0.0.1}:${LLAMACPP_PORT:-8083}  (no auth — local only)"
 fi
 
 echo ""

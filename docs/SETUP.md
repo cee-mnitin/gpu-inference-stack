@@ -103,7 +103,12 @@ cd ~
 git clone <your-repo-url> gpu-inference-stack
 cd gpu-inference-stack
 
-# Choose and copy server profile
+# Choose and copy server profile. Pick the one matching this box:
+#   servers/server-default.env        8-24GB, vLLM, small models
+#   servers/server-high-vram.env      48GB+, vLLM
+#   servers/server-multi-gpu.env      2+ GPUs, tensor parallel
+#   servers/server-a6000-48gb.env     A6000 48GB, llama.cpp, contract box
+#   servers/server-blackwell-97gb.env RTX PRO 6000 97GB, llama.cpp, deep/vision
 cp servers/server-high-vram.env .env
 
 # Generate secure keys
@@ -138,6 +143,55 @@ GRAFANA_ADMIN_PASSWORD=<your-secure-password>
 VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct
 OLLAMA_PRELOAD_MODELS="qwen2.5:7b gemma3:12b"
 ```
+
+5. **Bind address** — check this before deploying:
+```bash
+ss -lntp | grep ':8080'   # anything already here?
+```
+LiteLLM binds `0.0.0.0:8080` by default, and `0.0.0.0` covers loopback — so a
+service holding even `127.0.0.1:8080` blocks it. Pin the interface if so:
+```bash
+LITELLM_BIND_ADDR=<this box's LAN or Netbird address>
+```
+The `server-a6000-48gb.env` profile already sets this, because that box runs
+another service on 8080.
+
+### If this box uses llama.cpp instead of vLLM
+
+The two engines are mutually exclusive per GPU and `deploy.sh` exits non-zero
+if both are enabled. The llama.cpp profiles ship with **both** disabled, so
+enable exactly one:
+
+```bash
+ENABLE_VLLM=false
+ENABLE_LLAMACPP=true
+```
+
+llama.cpp needs its GGUF weights on disk **before** the first deploy — nothing
+downloads them for you, and they are 35-82 GB:
+
+```bash
+mkdir -p ./data/llamacpp/models
+# Via container — needs no host Python. On Ubuntu the system Python is
+# PEP 668 externally-managed AND lacks ensurepip, so neither `pip install`
+# nor `python3 -m venv` works without `apt install python3.12-venv`.
+docker run --rm -v "$PWD/data/llamacpp/models:/out" \
+  --entrypoint sh python:3.12-slim -c \
+  'pip install -q "huggingface_hub[cli]" && \
+   hf download unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF \
+     Qwen3-Next-80B-A3B-Instruct-UD-Q3_K_XL.gguf --local-dir /out'
+```
+
+Verify the runtime image carries kernels for this box's compute capability —
+a mismatch does not degrade, every request dies with "no kernel image is
+available for execution on the device":
+
+```bash
+docker run --rm --entrypoint sh $LLAMACPP_IMAGE -c '/app/llama-server --version'
+```
+
+Full guide, including quant selection and five failure modes:
+[LLAMACPP.md](LLAMACPP.md).
 
 ## Step 5: Deploy
 

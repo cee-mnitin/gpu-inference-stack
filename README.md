@@ -128,6 +128,37 @@ like model nondeterminism.
     └──────────────┴─────────────────┘
 ```
 
+### Choosing an inference runtime
+
+Three backends can serve chat: **Ollama**, **vLLM**, and **llama.cpp**. vLLM is
+the default and stays the right choice for most boxes.
+
+Reach for **llama.cpp** when one of these holds:
+
+- **The weights are GGUF and larger than VRAM.** Its `-ncmoe` / `-ot`
+  CPU-offload path is mature — expert tensors go to host memory and the
+  server keeps serving.
+- **The box predates FP8/FP4 tensor cores.** On `sm_86` (Ampere, e.g. the
+  A6000) the FP8 and NVFP4 quants modern vLLM recipes assume have no native
+  kernel path.
+- **The model is `qwen4exp` / Qwen3.8-Flash-Next.** vLLM's host-memory PLE
+  prefetch for that architecture is still an open feature request upstream.
+
+**vLLM and llama.cpp are mutually exclusive per GPU.** `scripts/deploy.sh`
+exits non-zero if both are enabled — neither card in this fleet has the
+headroom for two engines, and the failure that prevents (OOM mid-request or
+thrashing) reaches a consumer as intermittent 5xx rather than as a config
+error. Both ship disabled in the two purpose-built profiles, so the operator
+enables exactly one.
+
+The runtime is part of what a *deployment* chooses, alongside the weights. The
+consumer contract above does not change: `CONTRACT_*_MODEL` /
+`CONTRACT_*_API_BASE` re-point a role at a different backend with no edit to
+`config/litellm/config.yaml`.
+
+See **[docs/LLAMACPP.md](docs/LLAMACPP.md)** for weights acquisition, quant
+selection, `fit` tuning, and five documented failure modes.
+
 ## Quick Start
 
 ### Prerequisites
@@ -262,6 +293,28 @@ docker compose logs -f vllm
 - vLLM with 35B model
 - Text embeddings enabled
 - GPU memory: 65%
+
+### A6000 48GB Profile (`server-a6000-48gb.env`)
+
+The contract box. RTX A6000, `sm_86`, 48 GB VRAM, 251 GB RAM, no NVMe.
+llama.cpp serves Qwen3-Next-80B-A3B (`UD-Q3_K_XL`, 33.19 GiB) behind all three
+required `gpu/chat/*` roles at 4 slots x 32k. `gpu/chat/vision` is left
+unserved — the model is text-only and there is no VRAM for a second one.
+
+Both engines ship disabled; enable `ENABLE_LLAMACPP=true`. This profile also
+sets `LITELLM_BIND_ADDR`, which is **required** on that box because another
+service already holds `127.0.0.1:8080`.
+
+### Blackwell 97GB Profile (`server-blackwell-97gb.env`)
+
+The deep / long-context / vision box. RTX PRO 6000 Blackwell Max-Q, `sm_120`,
+97 GB VRAM. llama.cpp serves Qwen3.8-Flash-Next (`UD-IQ3_XXS`, 76.3 GiB) behind
+`gpu/chat/interactive` and `gpu/chat/vision` at 1 slot x 128k.
+
+`gpu/chat/bulk` and `gpu/chat/fast` are deliberately **not** served here —
+Flash-Next is effectively single-slot and `fast` carries a 60s timeout — so the
+profile points them at the A6000 box instead. Cross-box role placement is what
+the contract's server-addressed indirection is for.
 
 ### Multi-GPU Profile (`server-multi-gpu.env`)
 - 2+ GPUs

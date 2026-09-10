@@ -14,6 +14,22 @@ if [ -f "$PROJECT_ROOT/.env" ]; then
     source "$PROJECT_ROOT/.env"
 fi
 
+# ---------------------------------------------------------------------------
+# Where is LiteLLM actually listening?
+#
+# `localhost` is WRONG on any box that pins LITELLM_BIND_ADDR — and pinning it
+# is mandatory wherever something else already holds :8080 (the A6000 box runs
+# a reverse proxy on 127.0.0.1:8080). Probing localhost there does not merely
+# fail, it probes THAT service and reports its answer: an HTTP 404 from an
+# unrelated proxy, indistinguishable from a broken LiteLLM.
+#
+# 0.0.0.0 means "all interfaces", so loopback is correct in that case.
+_litellm_host="${LITELLM_BIND_ADDR:-localhost}"
+case "$_litellm_host" in
+    ""|0.0.0.0|"[::]"|"::") _litellm_host="localhost" ;;
+esac
+LITELLM_BASE="http://${_litellm_host}:${LITELLM_PORT:-8080}"
+
 echo "GPU Inference Stack - Health Check"
 echo "==================================="
 echo ""
@@ -43,7 +59,10 @@ check_endpoint() {
 }
 
 # Check LiteLLM
-check_endpoint "LiteLLM" "http://localhost:${LITELLM_PORT:-8080}/health"
+# /health/liveliness, not /health: /health is the ADMIN endpoint — it requires
+# a key and fires a real request at every configured backend on every probe.
+# The compose healthcheck for this service carries the same note.
+check_endpoint "LiteLLM" "${LITELLM_BASE}/health/liveliness"
 
 # Check Prometheus
 check_endpoint "Prometheus" "http://localhost:${PROMETHEUS_PORT:-9090}/-/healthy"
@@ -59,6 +78,95 @@ fi
 # Check vLLM if enabled
 if [ "${ENABLE_VLLM}" = "true" ]; then
     check_endpoint "vLLM" "http://localhost:${VLLM_PORT:-8000}/health"
+fi
+
+# Check llama.cpp if enabled (the alternative chat engine)
+if [ "${ENABLE_LLAMACPP}" = "true" ]; then
+    check_endpoint "llama.cpp" "http://localhost:${LLAMACPP_PORT:-8083}/health"
+
+    # ------------------------------------------------------------------------
+    # CONTEXT-PER-SLOT ASSERTION
+    #
+    # llama-server's --ctx-size is a POOL divided across --parallel slots, so
+    # -c 32768 with -np 4 serves 8k per slot while gpu/chat/interactive and
+    # gpu/chat/bulk promise >=32k. NOTHING else in this script catches that:
+    # the container is healthy, /v1/models lists the alias, and the contract
+    # call probe below sends a SHORT prompt that succeeds at any context size.
+    # The failure surfaces only on real long prompts, in production, as a
+    # consumer-side 400 or a silent truncation.
+    #
+    # There is a second route in: -fit defaults to `on` and adjusts *unset*
+    # arguments to fit device memory, with --fit-ctx (default 4096) as the
+    # floor it may shrink context to. docker-compose.yml pins --ctx-size
+    # explicitly to immunise against that, but neither that pin nor the .env
+    # can catch a later edit that breaks the CTX_SIZE/PARALLEL ratio.
+    #
+    # So assert the LIVE value the server is actually serving, not the config.
+    # /props reports default_generation_settings.n_ctx, which is llama-server's
+    # PER-SLOT figure. /slots is the fallback: it is enabled by default,
+    # whereas --props gates only the POST form.
+    # ------------------------------------------------------------------------
+    echo -n "Checking llama.cpp context per slot... "
+    _lcbase="http://localhost:${LLAMACPP_PORT:-8083}"
+    _lcfloor="${LLAMACPP_CTX_PER_SLOT:-32768}"
+    _perslot=$(curl -s --max-time 5 "$_lcbase/props" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    v = d.get("default_generation_settings", {}).get("n_ctx")
+    print(int(v) if v is not None else "")
+except Exception:
+    print("")
+' 2>/dev/null)
+    if [ -z "$_perslot" ]; then
+        _perslot=$(curl -s --max-time 5 "$_lcbase/slots" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(int(d[0]["n_ctx"]) if isinstance(d, list) and d and "n_ctx" in d[0] else "")
+except Exception:
+    print("")
+' 2>/dev/null)
+    fi
+
+    case "$_perslot" in
+        ''|*[!0-9]*)
+            echo -e "${YELLOW}UNKNOWN${NC}"
+            echo "  Neither /props nor /slots returned an n_ctx. The server may"
+            echo "  still be loading (weights take minutes off a rotational"
+            echo "  disk). Re-run once 'llama.cpp' above reports OK."
+            ;;
+        *)
+            if [ "$_perslot" -lt "$_lcfloor" ]; then
+                echo -e "${RED}✗ $_perslot < $_lcfloor${NC}"
+                echo -e "  ${RED}CONTRACT VIOLATION${NC} — gpu/chat/interactive and gpu/chat/bulk"
+                echo "  promise >=32768 tokens of context; gpu/chat/fast promises >=16384."
+                echo "  llama-server divides LLAMACPP_CTX_SIZE across LLAMACPP_PARALLEL"
+                echo "  slots, so raise CTX_SIZE to PARALLEL x $_lcfloor, or lower PARALLEL."
+                echo "    LLAMACPP_CTX_SIZE=${LLAMACPP_CTX_SIZE:-unset}  LLAMACPP_PARALLEL=${LLAMACPP_PARALLEL:-unset}"
+                echo "  Note: the contract probe below will still PASS — its prompts are"
+                echo "  short. Only real long prompts fail, which is why this check exists."
+            else
+                echo -e "${GREEN}✓ $_perslot >= $_lcfloor${NC}"
+                # A floor check alone is not enough: something can silently
+                # REDUCE per-slot context and still clear 32768. Two known
+                # culprits — -fit shrinking an unset --ctx-size, and
+                # --kv-unified-per-slot acting as a cap rather than a floor.
+                # A 1-slot/128k deployment capped to 32k passes the floor
+                # while losing 4x the context it exists to provide. So also
+                # check the live value against the configured ratio.
+                if [ -n "${LLAMACPP_CTX_SIZE:-}" ] && [ -n "${LLAMACPP_PARALLEL:-}" ]; then
+                    _expect=$(( LLAMACPP_CTX_SIZE / LLAMACPP_PARALLEL ))
+                    if [ "$_perslot" -ne "$_expect" ]; then
+                        echo -e "  ${YELLOW}but expected $_expect${NC} (LLAMACPP_CTX_SIZE/LLAMACPP_PARALLEL)"
+                        echo "  Something reduced the live context below what .env asks for."
+                        echo "  Check the server log for 'capping per-slot context' or a fit"
+                        echo "  adjustment:  docker logs llamacpp 2>&1 | grep -iE 'cap|fit|n_ctx'"
+                    fi
+                fi
+            fi
+            ;;
+    esac
 fi
 
 # Check Infinity if enabled (contract embed + rerank roles)
@@ -99,7 +207,7 @@ fi
 echo ""
 echo "Ember contract aliases (what consumers address):"
 _served=$(curl -s -m 10 -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
-    "http://localhost:${LITELLM_PORT:-8080}/v1/models" 2>/dev/null \
+    "${LITELLM_BASE}/v1/models" 2>/dev/null \
     | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
 
 if [ -z "$_served" ]; then
@@ -144,7 +252,7 @@ fi
 if [ "${CONTRACT_PROBE:-1}" = "1" ] && [ -n "$_served" ]; then
     echo ""
     echo "Contract call probe (one real request per alias):"
-    _base="http://localhost:${LITELLM_PORT:-8080}"
+    _base="$LITELLM_BASE"
     _auth="Authorization: Bearer ${LITELLM_MASTER_KEY}"
 
     # Reports one line per alias. $1 alias, $2 endpoint path, $3 JSON body.

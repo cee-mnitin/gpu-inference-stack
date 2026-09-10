@@ -75,3 +75,22 @@ scrape_configs:
     metrics_path: '/metrics'
     scrape_interval: 30s
     scrape_timeout: 10s
+
+  # llama.cpp metrics.
+  # Scraping works only because docker-compose.yml sets
+  # LLAMA_ARG_ENDPOINT_METRICS=1 — llama-server's --metrics defaults to
+  # DISABLED, so the endpoint 404s on a stock server.
+  #
+  # Left unconditional: llamacpp and vllm are mutually exclusive per box, so
+  # exactly one of these two jobs has a live target at any time, and
+  # Prometheus treats a down target as a scrape failure rather than a config
+  # error. Keeping both jobs means the same prometheus.yml serves either
+  # engine with no edit, matching how the rest of this stack is configured.
+  - job_name: 'llamacpp'
+    static_configs:
+      - targets: ['llamacpp:8080']
+        labels:
+          service: 'llamacpp'
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
