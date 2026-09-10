@@ -142,6 +142,53 @@ echo ""
 echo "Active profiles: $PROFILES"
 echo ""
 
+# ---------------------------------------------------------------------------
+# CONTRACT / BACKEND CONSISTENCY
+#
+# A contract alias whose backend is not running is WORSE than an absent one.
+# LiteLLM publishes every alias in config.yaml regardless of whether its
+# api_base answers, so:
+#   - /v1/models lists the role
+#   - a consumer's boot check sees it and assumes the role is available
+#   - every real call then 500s ("Cannot connect to host ollama:11434")
+#
+# "Unserved" and "published but broken" are opposite states that look
+# identical from outside, which is the same trap as the Pillow and no-curl
+# bugs this repo has already fixed. Catch it here instead.
+#
+# Truly unserving an OPTIONAL role needs the alias commented out of
+# config/litellm/config.yaml as well — .env alone cannot remove it.
+_contract_warn=0
+_check_backend() {
+    # $1 = role label, $2 = that role's api_base, $3 = host substring,
+    # $4 = whether its service is enabled
+    case "$2" in
+        *"$3"*)
+            if [ "$4" != "true" ]; then
+                [ "$_contract_warn" = "0" ] && echo -e "${YELLOW}Warning: contract roles point at disabled backends.${NC}"
+                _contract_warn=1
+                echo "  $1 -> $3, but that service is not enabled."
+            fi
+            ;;
+    esac
+}
+_check_backend "gpu/chat/vision"  "${CONTRACT_VISION_API_BASE:-http://ollama:11434}"  "ollama"   "${ENABLE_OLLAMA}"
+_check_backend "gpu/embed/bge-m3" "${CONTRACT_EMBED_API_BASE:-http://infinity:7997}"  "infinity" "${ENABLE_INFINITY:-true}"
+_check_backend "gpu/rerank/*"     "${CONTRACT_RERANK_API_BASE:-http://infinity:7997}" "infinity" "${ENABLE_INFINITY:-true}"
+for _role in INTERACTIVE BULK FAST; do
+    eval "_base=\${CONTRACT_${_role}_API_BASE:-http://vllm:8000/v1}"
+    _check_backend "gpu/chat/$(echo "$_role" | tr 'A-Z' 'a-z')" "$_base" "vllm"     "${ENABLE_VLLM}"
+    _check_backend "gpu/chat/$(echo "$_role" | tr 'A-Z' 'a-z')" "$_base" "llamacpp" "${ENABLE_LLAMACPP}"
+done
+if [ "$_contract_warn" = "1" ]; then
+    echo ""
+    echo "  For an OPTIONAL role (vision, ocr) also comment out its block in"
+    echo "  config/litellm/config.yaml — otherwise the alias stays published in"
+    echo "  /v1/models and consumers will route to it and get 500s."
+    echo "  For a REQUIRED role, enable the backend instead."
+    echo ""
+fi
+
 # Pull images.
 # --ignore-buildable: litellm is built from config/litellm/Dockerfile (it needs
 # Pillow for the Ollama vision path), so it has no upstream tag to pull. Under

@@ -193,7 +193,30 @@ long way from "both engines were enabled". Neither GPU has the headroom:
 different devices via `GPU_DEVICES` / `LLAMACPP_GPU_DEVICES`, set
 `ALLOW_VLLM_LLAMACPP_COTENANCY=1`.
 
-### 5. Image built for the wrong compute capability
+### 5. An optional role published without a backend
+
+**Symptom:** `gpu/chat/vision` appears in `/v1/models`, then every call 500s
+with `Cannot connect to host ollama:11434`.
+
+**Cause:** LiteLLM publishes every alias in `config/litellm/config.yaml`
+regardless of whether its `api_base` answers. `ENABLE_OLLAMA=false` stops the
+container but does not remove the alias.
+
+This is worse than an absent alias. Per the contract, a consumer **routes
+around a missing optional role** (vision falls back to a cloud provider) but
+**breaks on a published-but-dead one** — it has no way to tell "unserved" from
+"serving badly".
+
+**Fix:** comment out that alias's block in `config/litellm/config.yaml` on the
+box that cannot serve it. It cannot be removed upstream, because the default
+profiles serve vision via Ollama and the Blackwell profile serves it via
+llama.cpp.
+
+`scripts/deploy.sh` warns whenever a contract role's `api_base` names a
+service whose `ENABLE_*` is false, so this is caught at deploy time — but the
+config edit is manual.
+
+### 6. Image built for the wrong compute capability
 
 **Symptom:** every request dies with `no kernel image is available for
 execution on the device`. The container is otherwise healthy.
