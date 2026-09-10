@@ -111,3 +111,116 @@ before starting anything.
 Multi-GPU scheduling, autoscaling, and model downloading remain out of scope.
 This spec is about a box being able to state what it serves, and the stack
 refusing to lie about it.
+
+---
+
+# Part 2 — one knob per server
+
+Added the same day, after Part 1 made the stack *capable* of describing
+different hardware but left no clean way to *select* a description.
+
+## Problem
+
+Profiles were applied by `cp servers/server-x.env .env`. That forks the profile
+the instant anything is tuned: the box drifts from the committed file and
+nothing can say how. It also meant the four machines' configurations lived
+nowhere reviewable — each existed only as whatever had been copied and then
+edited on that host.
+
+Two further gaps blocked cross-server work:
+
+- **No shared way to name a peer.** `server-blackwell-97gb.env` carried a
+  commented `CONTRACT_BULK_API_BASE=http://100.117.227.40:8080/v1`, so
+  delegating a role meant hardcoding an address in a profile, and every profile
+  that delegated repeated it.
+- **`api_key` was the literal `"EMPTY"`** for all three chat roles and vision.
+  Fine for a local engine; fatal for delegation, because a peer's LiteLLM
+  requires a real key and 401s. Cross-server delegation could not work at all.
+
+## Design
+
+**`SERVER_PROFILE=<name>` in `.env` selects `servers/server-<name>.env`.**
+Scripts layer it under `.env`:
+
+    docker compose --env-file servers/server-<name>.env --env-file .env …
+
+Compose unions the keys and the last file wins (verified on compose 5.1.4), so
+the committed profile is authoritative for hardware, models, VRAM split, ports
+and role wiring, while `.env` keeps only what is per-host: the profile name,
+the fleet block, secrets and host paths.
+
+The precedence cuts both ways, and that is the one sharp edge: **anything
+uncommented in `.env` beats the profile.** It is how a host keeps a deliberate
+one-off, and it is why every profile-owned key ships commented out in
+`.env.example` — 68 of them. An uncommented copy of a profile's key silently
+defeats profile selection, which is exactly the failure this layout exists to
+prevent, so the template must not hand anyone that footgun.
+
+`scripts/lib-profile.sh` resolves the profile; `scripts/dc.sh` is the wrapper
+for ad-hoc commands. A bare `docker compose` sees only `.env`, so profile
+values silently fall back to compose defaults written for another card — the
+helper prints that warning and `dc.sh` exists so nobody needs to remember the
+flags. A `SERVER_PROFILE` naming a file that does not exist is a hard error
+everywhere, never a fallback.
+
+**The fleet block.** `GPU_<octet>_URL` / `GPU_<octet>_KEY` for all four
+machines, in `.env`, byte-identical on every box. Named by the last octet of
+the Netbird address, because hardware gets replaced and roles move but the
+address is what a peer dials. The port is part of the value: `.63` runs on 8090
+since the shared platform's traefik holds 8080 there. A profile refers to these
+by name, so no profile repeats an address:
+
+    CONTRACT_BULK_API_BASE=${GPU_85_URL}/v1
+    CONTRACT_BULK_API_KEY=${GPU_85_KEY}
+
+Adding a fifth server is one edit to a block that is then copied unchanged,
+rather than a change to every host.
+
+**`api_key` per role, from the environment**, defaulting to `EMPTY` in compose.
+That is what makes delegation possible; the keys are virtual keys minted on
+each peer, never a peer's master key.
+
+**Several chat models per box.** `vllm`, `vllm2`, `vllm3` are three instances
+of one YAML-anchored definition, differing only in container name, published
+port and their `VLLM<N>_*` variables. Each instance maps its own variables onto
+the same internal names the shared command reads, which is what lets one
+command definition serve all three — the flag-omission logic from Part 1 is
+subtle enough that three copies would not stay in step.
+
+VRAM remains the profile's responsibility, stated in every profile that could
+get it wrong: vLLM preallocates, and each instance's utilization is a fraction
+of the whole card, not of what is left. Nothing prevents a profile summing past
+1.0 — the later instance simply fails to start. Only the 97 GB box has room for
+two; the 32 GB boxes run one and delegate.
+
+## The four profiles
+
+| Profile | Host | GPU | Engine |
+|---|---|---|---|
+| `40` | dd4-skynet | A6000 48 GB, sm_86 | llama.cpp, Qwen3-Next-80B Q3 |
+| `63` | ddai3 | RTX PRO 4500 32 GB, sm_120 | vLLM, Qwen3-30B-A3B AWQ |
+| `72` | ddai5 | RTX PRO 4500 32 GB, sm_120 | vLLM, same |
+| `85` | crimson-llm2 | RTX PRO 6000 97 GB, sm_120 | vLLM ×2 |
+
+`63` and `72` are deliberately near-identical: `diff` between them shows only
+`SERVER_NAME` and `LITELLM_PORT`, which is the point — anything else appearing
+in that diff is drift worth explaining.
+
+The hardware-class templates remain, for new hardware. They ship both chat
+engines disabled because a template cannot know which you want; a per-server
+profile is activated as-is and enables one.
+
+## Verified
+
+All four profiles render their own gateway address/port, models, role wiring
+and instance count, with `.env` trimmed to per-host state on ddai3. The live
+ddai3 stack was brought up through the layered path and serves all five of its
+roles — three chat with zero reasoning leakage, 1024-dim embeddings, correct
+rerank ordering — with vision correctly published as `unserved/vision`. A
+nonexistent `SERVER_PROFILE` fails loudly. `check-contract-wiring.sh` confirms
+all 16 `os.environ/` names reach the container, and was re-tested against a
+deliberately regressed compose to confirm it still fails.
+
+Also fixed here: Part 1's command rework had dropped
+`--structured-outputs-config`, losing xgrammar JSON enforcement that the
+contract's chat roles promise. Restored, conditionally, and passed per instance.

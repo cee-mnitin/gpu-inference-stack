@@ -1,326 +1,114 @@
 # Server Profiles
 
-This directory contains preconfigured server profiles for different GPU configurations.
-
-## Available Profiles
-
-### 1. Default Profile (`server-default.env`)
-
-**For**: Entry-level GPU servers
-- Single GPU with 8-24GB VRAM
-- Examples: RTX 3090, RTX 4090, A10
-
-**Configuration**:
-- Ollama with small models (7B)
-- vLLM with 7B model
-- 50% GPU memory utilization
-- No embeddings service
-- 2 parallel requests
-
-**Use when**: You have a consumer-grade GPU or limited VRAM
-
-### 2. High VRAM Profile (`server-high-vram.env`)
-
-**For**: Professional/datacenter single GPU servers
-- Single GPU with 48GB+ VRAM
-- Examples: RTX 6000 Ada, A100, H100, L40S
-
-**Configuration**:
-- Ollama with multiple large models
-- vLLM with 35B model
-- 65% GPU memory utilization
-- Embeddings service enabled
-- 4 parallel requests
-- Prefix caching enabled
-- Tool calling enabled
-
-**Use when**: You have a high-end workstation or datacenter GPU
-
-### 3. Multi-GPU Profile (`server-multi-gpu.env`)
-
-**For**: Multi-GPU servers
-- 2+ GPUs
-- Examples: 2x A100, 4x H100, etc.
-
-**Configuration**:
-- Tensor parallelism enabled (models split across GPUs)
-- vLLM using both GPUs
-- 70% GPU memory utilization
-- Multiple Ollama models
-- Embeddings service on separate GPU
-- 4 parallel requests
-- Enhanced throughput settings
-
-**Use when**: You have multiple GPUs and want to run large models
-
-### 4. A6000 48GB Profile (`server-a6000-48gb.env`)
-
-- **Hardware**: RTX A6000, `sm_86` (Ampere), 48 GB VRAM, 251 GB RAM
-- **Storage**: rotational SAS, **no NVMe** — hence `LLAMACPP_LAZY_MODE=off`
-- **Engine**: llama.cpp (vLLM cannot use FP8/NVFP4 natively on `sm_86`)
-- **Model**: Qwen3-Next-80B-A3B `UD-Q3_K_XL`, 33.19 GiB, 4 slots x 32k
-- **Contract**: fills `interactive` + `bulk` + `fast`; `vision` unserved
-- **Note**: sets `LITELLM_BIND_ADDR` — required, port 8080 is occupied there
-
-### 5. Blackwell 97GB Profile (`server-blackwell-97gb.env`)
-
-- **Hardware**: RTX PRO 6000 Blackwell Max-Q, `sm_120`, 97 GB VRAM
-- **Engine**: llama.cpp, image pinned to `b10644` (llama.cpp#28355)
-- **Model**: Qwen3.8-Flash-Next `UD-IQ3_XXS`, 76.3 GiB, 1 slot x 128k
-- **Contract**: fills `interactive` + `vision`; `bulk`/`fast` point at the A6000
-- **Verify first**: confirm the image carries `sm_120` kernels, or every
-  request dies with "no kernel image is available for execution on the device"
-
-**Both of these ship with both engines disabled.** Enable exactly one —
-`deploy.sh` exits non-zero if `ENABLE_VLLM` and `ENABLE_LLAMACPP` are both
-true. See [../docs/LLAMACPP.md](../docs/LLAMACPP.md).
-
-## How to Use
-
-### Quick Start
-
-1. Copy the appropriate profile:
-```bash
-cp servers/server-high-vram.env .env
-```
-
-2. Edit for your specific needs:
-```bash
-nano .env
-```
-
-3. Deploy:
-```bash
-./scripts/deploy.sh
-```
-
-### Customizing a Profile
-
-## Bind the consumer contract, or say why not
-
-A profile's job is to answer one question per role: **which weights serve it,
-on which backend.** The role NAMES are fixed (`gpu/chat/interactive`,
-`gpu/chat/bulk`, …); the weights are this box's business. That split is the
-whole portability guarantee — one consumer preset moves between a 48 GB A6000
-and a 97 GB Blackwell without either side editing YAML.
-
-```
-server-a6000-48gb.env      interactive/bulk/fast -> qwen3-next-80b
-server-blackwell-97gb.env  interactive          -> qwen38-flash-next
-                           bulk, fast           -> UNSERVED (declared)
-```
-
-`config/litellm/config.yaml` reads `model: os.environ/CONTRACT_<ROLE>_MODEL`
-**bare — no fallback.** Leave it unset and LiteLLM still publishes the alias
-in `/v1/models` while every request to it returns 500, which from a consumer's
-side is indistinguishable from a role the box deliberately does not serve.
-
-So a role must be either **bound** or **declared unserved**:
+One knob activates a machine. Put this in `.env`:
 
 ```bash
-CONTRACT_BULK_MODEL=openai/your-model      # bound
-CONTRACT_BULK_API_BASE=http://vllm:8000/v1
-
-CONTRACT_UNSERVED_ROLES="bulk fast"        # or declared unserved
+SERVER_PROFILE=63          # -> servers/server-63.env
 ```
 
-`scripts/deploy.sh` **refuses to start** a stack with a role that is neither
-(`ALLOW_UNBOUND_CONTRACT_ROLES=1` overrides, for a live migration). One model
-may serve several roles — `server-a6000-48gb.env` points all three chat roles
-at the same weights.
-
-Declaring a role unserved does **not** unpublish its alias: `config/litellm`
-is shared by every profile, so `/v1/models` still lists it. That is the
-consumer's cue to reach the role on a box that serves it
-(`gpu.<server>/chat/bulk`), which is what the contract's server-addressed
-indirection is for.
-
-`server-default.env`, `server-high-vram.env` and `server-multi-gpu.env` bind
-no chat role — they are starting points, and deploy will refuse until you
-bind or declare each one.
-
-All profiles are starting points. Customize based on:
-
-1. **Your GPU**: Check VRAM with `nvidia-smi`
-2. **Your models**: Adjust which models to load
-3. **Your workload**: Tune concurrent requests
-
-## Creating Custom Profiles
-
-Create server-specific profiles for your fleet:
+Then use `scripts/deploy.sh` to bring it up, or `scripts/dc.sh` for anything
+ad-hoc. **A bare `docker compose` does not see the profile** — it reads `.env`
+only, so every profile value falls back to a compose default written for a
+different class of card.
 
 ```bash
-# Create profile
-cp servers/server-default.env servers/prod-gpu-01.env
-
-# Edit with server-specific settings
-nano servers/prod-gpu-01.env
-
-# Commit to git
-git add servers/prod-gpu-01.env
-git commit -m "Add prod-gpu-01 profile"
+scripts/dc.sh ps
+scripts/dc.sh logs -f litellm
+scripts/dc.sh config | less
 ```
 
-On the server:
-```bash
-ln -s servers/prod-gpu-01.env .env
-./scripts/deploy.sh
+## How layering works
+
+```
+docker compose --env-file servers/server-<name>.env --env-file .env …
 ```
 
-## Profile Comparison
+Compose unions the keys of every `--env-file` and **the last file wins**. So
+the committed profile supplies this box's hardware, models, VRAM split, ports
+and role wiring, while `.env` supplies only what is genuinely per-host:
+`SERVER_PROFILE`, the fleet address block, secrets, and host paths.
 
-| Feature | Default | High VRAM | Multi-GPU | A6000 48GB | Blackwell 97GB |
-|---------|---------|-----------|-----------|------------|----------------|
-| VRAM Required | 8-24GB | 48GB+ | 96GB+ total | 48GB | 97GB |
-| Chat engine | vLLM | vLLM | vLLM | llama.cpp | llama.cpp |
-| Ollama Models | 1 small | 3-4 mixed | 4+ mixed | none | none |
-| Chat model size | 7B | 35B | 35B+ | 80B-A3B | 125B-A6B |
-| GPU Memory % | 50% | 65% | 70% | fit-managed | fit-managed |
-| Embeddings | No | Yes | Yes | Yes (Infinity) | Yes (Infinity) |
-| Parallel Requests | 2 | 4 | 4 | 4 | 1 |
-| Context per slot | 8k | 16k | 32k | 32k | 128k |
-| Tensor Parallel | No | No | Yes | No | No |
-| Prefix Caching | No | Yes | Yes | Yes (cache-reuse) | Yes (cache-reuse) |
-| Contract chat roles | all 3 | all 3 | all 3 | all 3 | interactive only |
-| `gpu/chat/vision` | Ollama | Ollama | Ollama | unserved | the model itself |
+That ordering is the design. It also means **anything uncommented in `.env`
+beats the profile** — useful for a deliberate one-off, and the reason every
+profile-owned key ships commented out in `.env.example`. An uncommented copy of
+a profile's key silently defeats profile selection.
 
-## Key Variables Explained
+The old flow was `cp servers/server-x.env .env`, which forks the profile the
+moment anything is tuned: the box drifts from the committed file and nothing
+can tell you how. Layering keeps the profile authoritative.
 
-### GPU Configuration
-```bash
-GPU_DEVICES=0          # Which GPU to use (0,1 for multi-GPU)
-GPU_VRAM_TOTAL=96      # Total VRAM in GB (for documentation)
-```
+## The four machines
 
-### Ollama Settings
-```bash
-ENABLE_OLLAMA=true                    # Enable/disable Ollama
-OLLAMA_NUM_PARALLEL=4                 # Concurrent requests
-OLLAMA_MAX_LOADED_MODELS=2            # Max models in memory
-OLLAMA_PRELOAD_MODELS="model1 model2" # Auto-load these models
-```
+| Profile | Host | GPU | Chat engine | Notes |
+|---|---|---|---|---|
+| `40` | dd4-skynet, 100.117.227.40 | RTX A6000, 48 GB, sm_86 | llama.cpp, Qwen3-Next-80B Q3 | Ampere — none of the Blackwell traps apply |
+| `63` | ddai3, 100.117.227.63 | RTX PRO 4500 Blackwell, 32 GB, sm_120 | vLLM, Qwen3-30B-A3B AWQ | gateway on **8090** — the shared platform holds 8080 |
+| `72` | ddai5, 100.117.227.72 | RTX PRO 4500 Blackwell, 32 GB, sm_120 | vLLM, Qwen3-30B-A3B AWQ | near-copy of `63`; `diff` shows only the host-specific lines |
+| `85` | crimson-llm2, 100.117.227.85 | RTX PRO 6000 Blackwell, 97 GB, sm_120 | vLLM ×2 | the only box with room for **two** chat models |
 
-### vLLM Settings
-```bash
-VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct         # HuggingFace model
-VLLM_MODEL_NAME=qwen2.5-7b                  # Name in LiteLLM
-VLLM_GPU_MEMORY_UTILIZATION=0.65            # % of GPU to use
-VLLM_MAX_MODEL_LEN=16384                    # Max context length
-VLLM_MAX_NUM_SEQS=64                        # Batch size
-VLLM_TENSOR_PARALLEL_SIZE=1                 # GPUs for model
-VLLM_ENABLE_PREFIX_CACHING=true             # Cache repeated prefixes
-```
+The hardware-class files (`server-default.env`, `server-high-vram.env`,
+`server-multi-gpu.env`, `server-a6000-48gb.env`, `server-blackwell-32gb.env`,
+`server-blackwell-97gb.env`) remain as templates for new hardware. They ship
+both chat engines disabled, because a template cannot know which you want; a
+per-server profile is meant to be activated as-is and enables one.
 
-### Embeddings Settings
-```bash
-ENABLE_EMBEDDINGS=true                      # Enable/disable
-EMBEDDINGS_MODEL=BAAI/bge-m3                # Model to use
-EMBEDDINGS_MAX_BATCH_TOKENS=16384           # Batch size
-```
+## Several chat models on one box
 
-## GPU Memory Guidelines
-
-### How to Calculate
-
-Total VRAM needed ≈ Model Size + Context Buffer + Overhead
-
-**Example for 48GB GPU**:
-- vLLM 35B model (FP8): ~18GB
-- Context buffer (16K): ~8GB
-- Ollama 7B models (2x): ~8GB
-- Embeddings: ~2GB
-- Overhead: ~4GB
-- **Total**: ~40GB (83% of 48GB) ✓
-
-### Optimization Tips
-
-1. **Too little VRAM?**
-   - Reduce `VLLM_GPU_MEMORY_UTILIZATION`
-   - Use smaller models
-   - Reduce `VLLM_MAX_MODEL_LEN`
-   - Disable embeddings
-
-2. **VRAM to spare?**
-   - Increase `VLLM_MAX_NUM_SEQS` for throughput
-   - Load more Ollama models
-   - Increase `VLLM_MAX_MODEL_LEN`
-
-3. **Multiple GPUs?**
-   - Use tensor parallelism for large models
-   - Or run different models on different GPUs
-   - Dedicate one GPU to embeddings
-
-## Troubleshooting Profiles
-
-### Profile doesn't work
+`vllm`, `vllm2` and `vllm3` are three instances of one anchored definition,
+differing only in name, port and `VLLM<N>_*` variables. A profile enables the
+ones its card can hold:
 
 ```bash
-# Check GPU
-nvidia-smi
-
-# Check actual VRAM
-nvidia-smi --query-gpu=memory.total --format=csv,noheader
-
-# Test with reduced settings
-VLLM_GPU_MEMORY_UTILIZATION=0.40
-VLLM_MAX_MODEL_LEN=8192
+ENABLE_VLLM=true
+ENABLE_VLLM2=true              # 97 GB box only
+VLLM2_MODEL=Qwen/Qwen3.6-35B-A3B-FP8
+VLLM2_MODEL_NAME=qwen3.6-bulk
+VLLM2_GPU_MEMORY_UTILIZATION=0.44
+CONTRACT_BULK_MODEL=openai/qwen3.6-bulk
+CONTRACT_BULK_API_BASE=http://vllm2:8000/v1
 ```
 
-### Want to test before deploying?
+**VRAM is the profile's responsibility.** vLLM *preallocates*, and each
+instance's `gpu-memory-utilization` is a fraction of the **whole card**, not of
+what is left. Nothing stops a profile summing past 1.0 — the second or third
+instance simply fails to start. On a 32 GB card one instance plus Infinity is
+already the limit: delegate instead of splitting.
+
+## Serving a different model
+
+Every model-shape flag is **omitted entirely** when its variable is empty,
+which is the only way some models work at all:
+
+| Variable | Empty means |
+|---|---|
+| `VLLM_REASONING_PARSER` | non-thinking model. Left set, an Instruct model returns `content: null` with the answer in `reasoning_content` on every call |
+| `VLLM_TOOL_CALL_PARSER` | no tool calling — also suppresses `--enable-auto-tool-choice`, which requires a parser |
+| `VLLM_EXPERT_PARALLEL` | dense (non-MoE) model |
+| `VLLM_PREFIX_CACHING`, `VLLM_CHUNKED_PREFILL` | disabled |
+| `VLLM_STRUCTURED_OUTPUTS_CONFIG` | no xgrammar JSON enforcement |
+| `VLLM_EXTRA_ARGS` | appended verbatim, for anything unmodelled |
+
+## Delegating a role to another box
+
+A card that cannot serve a role points it at a peer. Addresses come from the
+fleet block in `.env`, so no profile repeats an IP:
 
 ```bash
-# Dry run
-docker compose config
-
-# Check memory would fit
-# (Model size in GB) / (GPU VRAM in GB) < GPU_MEMORY_UTILIZATION
+CONTRACT_BULK_API_BASE=${GPU_85_URL}/v1
+CONTRACT_BULK_MODEL=openai/qwen3.6
+CONTRACT_BULK_API_KEY=${GPU_85_KEY}
 ```
 
-## Examples
+`/v1` is required for chat and vision bases; the embed and rerank bases must
+**not** have it, because LiteLLM appends that path itself. A role that is
+deliberately unserved goes in `CONTRACT_UNSERVED_ROLES` so `deploy.sh` can tell
+"not served here" from "forgotten".
 
-### Example 1: RTX 4090 (24GB)
-```bash
-cp servers/server-default.env .env
-# Edit:
-GPU_VRAM_TOTAL=24
-VLLM_MODEL=Qwen/Qwen2.5-14B-Instruct
-VLLM_GPU_MEMORY_UTILIZATION=0.60
-ENABLE_EMBEDDINGS=false
-```
+## Blackwell (sm_120) gotchas
 
-### Example 2: A100 (80GB)
-```bash
-cp servers/server-high-vram.env .env
-# Edit:
-GPU_VRAM_TOTAL=80
-VLLM_MODEL=meta-llama/Llama-3.1-70B-Instruct
-VLLM_GPU_MEMORY_UTILIZATION=0.70
-OLLAMA_MAX_LOADED_MODELS=3
-```
-
-### Example 3: 2x H100 (160GB total)
-```bash
-cp servers/server-multi-gpu.env .env
-# Edit:
-GPU_DEVICES=0,1
-GPU_VRAM_TOTAL=160
-VLLM_MODEL=meta-llama/Llama-3.1-405B-Instruct-FP8
-VLLM_TENSOR_PARALLEL_SIZE=2
-VLLM_GPU_MEMORY_UTILIZATION=0.75
-```
-
-## Contributing
-
-Found a profile that works well for a specific GPU? Contribute it!
-
-```bash
-# Create your profile
-cp .env servers/server-rtx4090.env
-
-# Document it
-# Add to this README
-
-# Submit PR
-git add servers/server-rtx4090.env servers/README.md
-git commit -m "Add RTX 4090 profile"
-```
+- **vLLM 0.23.0 predates sm_120** and does not degrade gracefully. Set
+  `VLLM_IMAGE=vllm/vllm-openai:v0.25.1` or newer.
+- **TEI has no Blackwell build** — turing / 89 / hopper / latest only. It
+  crash-loops with `Runtime compute cap 120 is not compatible with compile time
+  compute cap 80`. Use Infinity, which also serves the reranker from the same
+  container.

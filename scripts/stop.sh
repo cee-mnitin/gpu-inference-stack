@@ -14,7 +14,13 @@ echo -e "${YELLOW}Stopping GPU Inference Stack...${NC}"
 echo ""
 
 # Stop all services
-docker compose -f "$PROJECT_ROOT/docker-compose.yml" down
+# shellcheck source=lib-profile.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
+# Same layering as deploy.sh. Without it compose resolves different port
+# mappings than the ones the stack was started with, and `down` can miss
+# containers on a box whose profile shifts ports.
+# shellcheck disable=SC2046
+docker compose $(profile_env_file_args) -f "$PROJECT_ROOT/docker-compose.yml" down
 
 echo ""
 echo -e "${GREEN}All services stopped${NC}"

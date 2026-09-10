@@ -52,8 +52,15 @@ fi
 # Read the RENDERED config, not the raw YAML: that resolves ${VAR:-default}
 # and any override file, which is what actually reaches the container. Every
 # profile is enabled so litellm is always present in the render.
-rendered="$(cd "$REPO_DIR" && docker compose \
-    --profile vllm --profile llamacpp --profile ollama \
+# Layer the active server profile in, exactly as deploy.sh does — otherwise
+# this renders a box's config with someone else's defaults and its verdict
+# would not describe the machine it is running on.
+# shellcheck source=lib-profile.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib-profile.sh"
+# shellcheck disable=SC2046
+rendered="$(cd "$REPO_DIR" && docker compose $(profile_env_file_args) \
+    --profile vllm --profile vllm2 --profile vllm3 \
+    --profile llamacpp --profile ollama \
     --profile embeddings --profile infinity --profile nginx \
     config 2>/dev/null)"
 if [ -z "$rendered" ]; then

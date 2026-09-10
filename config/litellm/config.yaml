@@ -48,7 +48,11 @@ model_list:
     litellm_params:
       model: os.environ/CONTRACT_INTERACTIVE_MODEL
       api_base: os.environ/CONTRACT_INTERACTIVE_API_BASE
-      api_key: "EMPTY"
+      # From env, NOT a literal "EMPTY". A role served by a LOCAL engine needs
+      # no key and compose defaults this to EMPTY; a role DELEGATED to a peer
+      # stack needs that peer's key, and hardcoding EMPTY made cross-server
+      # delegation impossible — the peer's LiteLLM 401s.
+      api_key: os.environ/CONTRACT_INTERACTIVE_API_KEY
       timeout: 600
     model_info:
       mode: chat
@@ -60,7 +64,11 @@ model_list:
     litellm_params:
       model: os.environ/CONTRACT_BULK_MODEL
       api_base: os.environ/CONTRACT_BULK_API_BASE
-      api_key: "EMPTY"
+      # From env, NOT a literal "EMPTY". A role served by a LOCAL engine needs
+      # no key and compose defaults this to EMPTY; a role DELEGATED to a peer
+      # stack needs that peer's key, and hardcoding EMPTY made cross-server
+      # delegation impossible — the peer's LiteLLM 401s.
+      api_key: os.environ/CONTRACT_BULK_API_KEY
       timeout: 600
       # Hybrid-thinking models: keep thinking OFF for this role.
       #
@@ -90,7 +98,11 @@ model_list:
     litellm_params:
       model: os.environ/CONTRACT_FAST_MODEL
       api_base: os.environ/CONTRACT_FAST_API_BASE
-      api_key: "EMPTY"
+      # From env, NOT a literal "EMPTY". A role served by a LOCAL engine needs
+      # no key and compose defaults this to EMPTY; a role DELEGATED to a peer
+      # stack needs that peer's key, and hardcoding EMPTY made cross-server
+      # delegation impossible — the peer's LiteLLM 401s.
+      api_key: os.environ/CONTRACT_FAST_API_KEY
       # Deliberately shorter than the 600s above: this role exists for
       # latency-sensitive calls, so a slow response is a failure, not a wait.
       timeout: 60
@@ -147,6 +159,8 @@ model_list:
     litellm_params:
       model: os.environ/CONTRACT_VISION_MODEL
       api_base: os.environ/CONTRACT_VISION_API_BASE
+      # See the chat roles: EMPTY locally, the peer's key when delegated.
+      api_key: os.environ/CONTRACT_VISION_API_KEY
       timeout: 300
       # Vision calls are expensive and a blind retry doubles the cost of a
       # genuinely bad image. Per-deployment override of router num_retries.

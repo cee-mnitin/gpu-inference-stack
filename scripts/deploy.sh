@@ -25,8 +25,34 @@ if [ ! -f "$PROJECT_ROOT/.env" ]; then
     exit 1
 fi
 
-# Load environment variables
+# Load the active server profile, then .env on top.
+#
+# Order matters and mirrors what compose is given below: the committed profile
+# supplies this box's hardware, models and role wiring; .env overrides with
+# secrets and any local one-off. Sourcing .env LAST is what makes it win.
+#
+# shellcheck source=lib-profile.sh
+. "$SCRIPT_DIR/lib-profile.sh"
+
+_PROFILE_FILE="$(profile_path)" || true
+if [ -n "${_PROFILE_FILE:-}" ]; then
+    # shellcheck disable=SC1090
+    source "$_PROFILE_FILE"
+fi
 source "$PROJECT_ROOT/.env"
+
+# A named-but-missing profile must stop the deploy: silently falling through to
+# compose defaults written for a different class of card is how a box ends up
+# serving a model it cannot hold.
+if ! profile_assert_resolvable >/dev/null 2>&1; then
+    profile_assert_resolvable
+    exit 1
+fi
+
+# Every compose invocation below gets the same layering. Unquoted on purpose —
+# profile_env_file_args emits separate --env-file words.
+# shellcheck disable=SC2046
+DC=(docker compose $(profile_env_file_args) -f "$PROJECT_ROOT/docker-compose.yml")
 
 # ---------------------------------------------------------------------------
 # ENGINE EXCLUSIVITY  —  vLLM and llama.cpp cannot share a GPU here.
@@ -78,7 +104,7 @@ fi
 
 echo "Configuration:"
 echo "  Server Name: ${SERVER_NAME:-gpu-server-1}"
-echo "  Server Profile: ${SERVER_PROFILE:-default}"
+profile_assert_resolvable
 echo "  GPU Devices: ${GPU_DEVICES:-0}"
 echo ""
 
@@ -132,6 +158,18 @@ if [ "${ENABLE_VLLM}" = "true" ]; then
     PROFILES="$PROFILES,vllm"
     echo "Enabling vLLM..."
 fi
+
+# Additional chat instances. Only the 97 GB box has room for more than one;
+# a profile that enables these on a smaller card will simply fail to start the
+# second container, because vLLM preallocates its share of the WHOLE GPU.
+for _n in 2 3; do
+    eval "_on=\${ENABLE_VLLM${_n}:-false}"
+    if [ "$_on" = "true" ]; then
+        PROFILES="$PROFILES,vllm${_n}"
+        eval "_m=\${VLLM${_n}_MODEL_NAME:-<inherits instance 1>}"
+        echo "Enabling vLLM instance ${_n} ($_m)..."
+    fi
+done
 
 # llama.cpp — the alternative chat engine. Exclusivity with vLLM was already
 # enforced above, so at most one of these two branches can be taken.
@@ -267,16 +305,15 @@ fi
 # Pillow for the Ollama vision path), so it has no upstream tag to pull. Under
 # `set -e` a pull that trips over a locally-built image aborts the whole deploy.
 echo "Pulling Docker images..."
-COMPOSE_PROFILES="$PROFILES" docker compose -f "$PROJECT_ROOT/docker-compose.yml" \
-    pull --ignore-buildable
+COMPOSE_PROFILES="$PROFILES" "${DC[@]}" pull --ignore-buildable
 
 echo ""
 echo "Building local images..."
-COMPOSE_PROFILES="$PROFILES" docker compose -f "$PROJECT_ROOT/docker-compose.yml" build
+COMPOSE_PROFILES="$PROFILES" "${DC[@]}" build
 
 echo ""
 echo -e "${GREEN}Starting services...${NC}"
-COMPOSE_PROFILES="$PROFILES" docker compose -f "$PROJECT_ROOT/docker-compose.yml" up -d
+COMPOSE_PROFILES="$PROFILES" "${DC[@]}" up -d
 
 echo ""
 echo "Waiting for services to initialize (this may take 2-5 minutes for vLLM)..."
@@ -320,7 +357,7 @@ fi
 # Check service health
 echo ""
 echo "Service Status:"
-docker compose -f "$PROJECT_ROOT/docker-compose.yml" ps
+"${DC[@]}" ps
 
 echo ""
 echo -e "${GREEN}Deployment complete!${NC}"
