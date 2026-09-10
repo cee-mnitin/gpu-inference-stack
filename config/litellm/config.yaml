@@ -62,6 +62,24 @@ model_list:
       api_base: os.environ/CONTRACT_BULK_API_BASE
       api_key: "EMPTY"
       timeout: 600
+      # Hybrid-thinking models: keep thinking OFF for this role.
+      #
+      # Spec 0035 puts thinking-mode config on this alias layer, and the two
+      # throughput/latency roles are where it has to be off. A consumer drives
+      # them with response_format (JSON), and vLLM applies the JSON grammar
+      # from the FIRST token — including the span where the model wants to emit
+      # its <think> block. The grammar forbids <think> but permits unbounded
+      # whitespace, so the model emits "{" and then thousands of blank lines
+      # until max_tokens: observed live as ~17,000 lines of whitespace and
+      # "Expecting property name enclosed in double quotes", which a consumer
+      # sees as an intermittent structured-output parse failure and burns a
+      # full generation plus a retry on.
+      #
+      # A per-call extra_body from the consumer still wins over this by the
+      # router's merge order, and on a non-thinking model the kwarg is inert
+      # (an unknown chat-template variable is ignored by the template).
+      chat_template_kwargs:
+        enable_thinking: false
     model_info:
       mode: chat
       supports_function_calling: true
@@ -76,6 +94,24 @@ model_list:
       # Deliberately shorter than the 600s above: this role exists for
       # latency-sensitive calls, so a slow response is a failure, not a wait.
       timeout: 60
+      # Hybrid-thinking models: keep thinking OFF for this role.
+      #
+      # Spec 0035 puts thinking-mode config on this alias layer, and the two
+      # throughput/latency roles are where it has to be off. A consumer drives
+      # them with response_format (JSON), and vLLM applies the JSON grammar
+      # from the FIRST token — including the span where the model wants to emit
+      # its <think> block. The grammar forbids <think> but permits unbounded
+      # whitespace, so the model emits "{" and then thousands of blank lines
+      # until max_tokens: observed live as ~17,000 lines of whitespace and
+      # "Expecting property name enclosed in double quotes", which a consumer
+      # sees as an intermittent structured-output parse failure and burns a
+      # full generation plus a retry on.
+      #
+      # A per-call extra_body from the consumer still wins over this by the
+      # router's merge order, and on a non-thinking model the kwarg is inert
+      # (an unknown chat-template variable is ignored by the template).
+      chat_template_kwargs:
+        enable_thinking: false
     model_info:
       mode: chat
       supports_function_calling: true
