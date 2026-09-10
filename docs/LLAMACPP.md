@@ -34,20 +34,15 @@ vLLM remains the default. Choose llama.cpp when one of these is true:
 
 Neither model is downloaded automatically — these are 35–82 GB transfers.
 
-The A6000 box has **841 GB free** and **no `hf` CLI installed**. Note that its
-system Python is **PEP 668 externally-managed**, so a bare
-`pip install huggingface_hub` is refused — use a venv:
+The A6000 box has **841 GB free** and no `hf` CLI. **Use the container path
+there** — the host Python cannot install one without `apt`:
 
-```bash
-python3 -m venv ~/.venvs/hf
-~/.venvs/hf/bin/pip install -q -U "huggingface_hub[cli]"
-mkdir -p ./data/llamacpp/models
-~/.venvs/hf/bin/hf download unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF \
-  Qwen3-Next-80B-A3B-Instruct-UD-Q3_K_XL.gguf \
-  --local-dir ./data/llamacpp/models
-```
+- `pip install huggingface_hub` is refused; the system Python ships
+  PEP 668 `EXTERNALLY-MANAGED`.
+- `python3 -m venv` also fails — `ensurepip` is absent, which needs
+  `apt install python3.12-venv` and therefore root.
 
-…or download through a container, which touches no host Python at all:
+So download through a container, which touches no host Python at all:
 
 ```bash
 mkdir -p ./data/llamacpp/models
@@ -56,6 +51,16 @@ docker run --rm -v "$PWD/data/llamacpp/models:/out" \
   'pip install -q "huggingface_hub[cli]" && \
    hf download unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF \
      Qwen3-Next-80B-A3B-Instruct-UD-Q3_K_XL.gguf --local-dir /out'
+```
+
+On a box that *does* have a working venv, the direct route is fine:
+
+```bash
+python3 -m venv ~/.venvs/hf
+~/.venvs/hf/bin/pip install -q -U "huggingface_hub[cli]"
+~/.venvs/hf/bin/hf download unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF \
+  Qwen3-Next-80B-A3B-Instruct-UD-Q3_K_XL.gguf \
+  --local-dir ./data/llamacpp/models
 ```
 
 Then point `LLAMACPP_MODEL_FILE` at the filename (not a path — the directory
