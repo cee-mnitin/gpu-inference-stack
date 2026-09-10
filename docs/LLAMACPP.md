@@ -34,18 +34,20 @@ vLLM remains the default. Choose llama.cpp when one of these is true:
 
 Neither model is downloaded automatically — these are 35–82 GB transfers.
 
-The A6000 box has **845 GB free** and **no `hf` CLI installed**. Either
-install it:
+The A6000 box has **841 GB free** and **no `hf` CLI installed**. Note that its
+system Python is **PEP 668 externally-managed**, so a bare
+`pip install huggingface_hub` is refused — use a venv:
 
 ```bash
-pip install -U "huggingface_hub[cli]"
+python3 -m venv ~/.venvs/hf
+~/.venvs/hf/bin/pip install -q -U "huggingface_hub[cli]"
 mkdir -p ./data/llamacpp/models
-hf download unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF \
+~/.venvs/hf/bin/hf download unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF \
   Qwen3-Next-80B-A3B-Instruct-UD-Q3_K_XL.gguf \
   --local-dir ./data/llamacpp/models
 ```
 
-…or download through a container, which needs no host Python:
+…or download through a container, which touches no host Python at all:
 
 ```bash
 mkdir -p ./data/llamacpp/models

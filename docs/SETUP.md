@@ -172,8 +172,10 @@ downloads them for you, and they are 35-82 GB:
 
 ```bash
 mkdir -p ./data/llamacpp/models
-pip install -U "huggingface_hub[cli]"
-hf download unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF \
+# Ubuntu's system Python is PEP 668 externally-managed, so use a venv:
+python3 -m venv ~/.venvs/hf
+~/.venvs/hf/bin/pip install -q -U "huggingface_hub[cli]"
+~/.venvs/hf/bin/hf download unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF \
   Qwen3-Next-80B-A3B-Instruct-UD-Q3_K_XL.gguf \
   --local-dir ./data/llamacpp/models
 ```
