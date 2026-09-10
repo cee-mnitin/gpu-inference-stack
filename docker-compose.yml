@@ -29,7 +29,16 @@ services:
       - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-4}
       - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-2}
       - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
-      - OLLAMA_KEEP_ALIVE=24h
+      # 24h was hardcoded here, which defeated the reason vision lives on
+      # Ollama at all. config/litellm/config.yaml says gpu/chat/vision is
+      # "Backed by Ollama rather than vLLM: the VL model is a secondary,
+      # low-volume model and Ollama can swap it in and out without taking VRAM
+      # from the chat model" — a 24h keep-alive pins it resident instead, so
+      # the first vision call permanently costs the box ~10 GB. On a 32 GB
+      # card co-tenanted with vLLM and Infinity that left under 1 GB free.
+      # A short idle unload is the behaviour the design assumes; raise it on a
+      # box with VRAM to spare, or where vision is high-volume.
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
     deploy:
       resources:
         reservations:
@@ -40,7 +49,11 @@ services:
     networks:
       - gpu-inference-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      # `ollama list`, not curl: this image ships NEITHER curl NOR wget, so the
+      # old probe exited 127 on every run and the container was permanently
+      # `unhealthy` while the API answered 200 on :11434. The bundled CLI
+      # queries that same local API and is guaranteed present.
+      test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -56,7 +69,16 @@ services:
   # Enhanced to match/replace existing vllm-qwen36 container with all features
   # ============================================================================
   vllm:
-    image: vllm/vllm-openai:v0.23.0  # Same version as existing for compatibility
+    # The RUNTIME is part of what a deployment picks, alongside the weights: a
+    # box's GPU generation decides which vLLM builds can run on it at all.
+    # sm_120 (Blackwell RTX PRO / 50-series) needs a CUDA 12.8+ build, and a
+    # too-old image does not degrade — every request dies with "no kernel image
+    # is available for execution on the device". So pin a default and let the
+    # box override it, rather than making a hardware constraint a YAML edit.
+    # Check a candidate before deploying:
+    #   docker run --rm --gpus all --entrypoint python3 <image> \
+    #     -c "import torch; print(torch.cuda.get_arch_list())"
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.23.0}
     container_name: vllm-new
     profiles:
       - vllm
@@ -87,14 +109,44 @@ services:
       - ${VLLM_MAX_NUM_SEQS:-62}
       - --tensor-parallel-size
       - ${VLLM_TENSOR_PARALLEL_SIZE:-1}
-      - --enable-prefix-caching
-      - --enable-chunked-prefill
-      - --enable-expert-parallel
+      # These three are argparse BooleanOptionalAction flags, so each has a
+      # --no-enable-* twin and neither form takes a value. compose can neither
+      # branch on a boolean nor word-split a string into argv, so the VALUE of
+      # each variable is the literal flag. Defaults keep the previous
+      # behaviour; a box overrides the one it needs to drop.
+      #
+      # --enable-expert-parallel is the one that matters: it is MoE-only, and
+      # vLLM does not warn and carry on — it refuses to start ("Number of
+      # experts in the model must be greater than 0 when expert parallelism is
+      # enabled"). Hardcoded, it made every dense model unservable, which is
+      # the opposite of this stack's premise that the deployment picks the
+      # weights. A dense box sets VLLM_EXPERT_PARALLEL_FLAG to the --no- form.
+      - ${VLLM_PREFIX_CACHING_FLAG:---enable-prefix-caching}
+      - ${VLLM_CHUNKED_PREFILL_FLAG:---enable-chunked-prefill}
+      - ${VLLM_EXPERT_PARALLEL_FLAG:---enable-expert-parallel}
       - --enable-auto-tool-choice
+      # Parsers follow the WEIGHTS, so they cannot be hardcoded: this stack's
+      # whole premise is that each box fills the contract roles with whatever
+      # model it can run. qwen3_xml is the Qwen3.6/Coder XML tool format and
+      # silently mis-parses a dense Qwen3's hermes-style tool calls — the
+      # request succeeds and the tool call is simply lost.
+      # Structured-output decoding. disable_any_whitespace is the load-bearing
+      # part, and it needs the backend pinned (it is rejected on any backend
+      # but xgrammar/guidance, and the default `auto` is neither).
+      #
+      # Without it, a JSON grammar permits UNBOUNDED whitespace between
+      # tokens, and a model can fall into emitting nothing else: observed live
+      # as `{"event_date": "2026-04-08"` followed by ~130,000 blank lines
+      # until max_tokens, surfacing to the consumer as an intermittent
+      # "Expecting ',' delimiter" parse failure that costs a full generation
+      # plus a repair retry. Newlines are cheap multi-character BPE tokens, so
+      # a 4k budget buys a lot of whitespace.
+      - --structured-outputs-config
+      - '${VLLM_STRUCTURED_OUTPUTS_CONFIG:-{"backend": "xgrammar", "disable_any_whitespace": true}}'
       - --tool-call-parser
-      - qwen3_xml
+      - ${VLLM_TOOL_CALL_PARSER:-qwen3_xml}
       - --reasoning-parser
-      - qwen3
+      - ${VLLM_REASONING_PARSER:-qwen3}
     deploy:
       resources:
         reservations:
@@ -287,7 +339,16 @@ services:
   # LITELLM - Unified LLM Gateway
   # ============================================================================
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    # Built, not pulled: config/litellm/Dockerfile adds Pillow to the upstream
+    # image. LiteLLM needs it to convert images for the OLLAMA backend, which
+    # is what backs the gpu/chat/vision contract alias by default — without it
+    # every vision call fails with "ollama image conversion failed please run
+    # `pip install Pillow`" while /v1/models still lists the alias and
+    # health-check.sh still reports it ✓.
+    build:
+      context: ./config/litellm
+      dockerfile: Dockerfile
+    image: gpu-inference-stack-litellm:latest
     container_name: litellm
     restart: unless-stopped
     ports:
@@ -337,11 +398,23 @@ services:
     networks:
       - gpu-inference-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      # python3, not curl: the litellm image has no curl, so the old check
+      # exited 127 ("executable file not found") on every probe and the
+      # container sat permanently `unhealthy` while serving 200s. A constant
+      # health signal is worse than none — it cannot report a gateway that has
+      # genuinely died, and it makes `depends_on: service_healthy` unusable
+      # against this service.
+      #
+      # /health/liveliness, not /health: /health is the ADMIN endpoint that
+      # probes every configured deployment (it needs a key, and on this box it
+      # would fire real requests at vLLM, Ollama and Infinity every 30s).
+      # /health/liveliness is the unauthenticated "is the process up" check.
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s
     logging:
       driver: "json-file"
       options:
@@ -478,7 +551,7 @@ services:
     container_name: node-exporter
     restart: unless-stopped
     ports:
-      - "9100:9100"
+      - "${NODE_EXPORTER_PORT:-9100}:9100"
     command:
       - '--path.procfs=/host/proc'
       - '--path.sysfs=/host/sys'
@@ -504,7 +577,7 @@ services:
     container_name: dcgm-exporter
     restart: unless-stopped
     ports:
-      - "9400:9400"
+      - "${DCGM_EXPORTER_PORT:-9400}:9400"
     deploy:
       resources:
         reservations:
@@ -530,7 +603,7 @@ services:
     container_name: redis-exporter
     restart: unless-stopped
     ports:
-      - "9121:9121"
+      - "${REDIS_EXPORTER_PORT:-9121}:9121"
     environment:
       - REDIS_ADDR=redis:6379
     depends_on:
