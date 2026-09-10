@@ -61,6 +61,79 @@ if [ "${ENABLE_VLLM}" = "true" ]; then
     check_endpoint "vLLM" "http://localhost:${VLLM_PORT:-8000}/health"
 fi
 
+# Check llama.cpp if enabled (the alternative chat engine)
+if [ "${ENABLE_LLAMACPP}" = "true" ]; then
+    check_endpoint "llama.cpp" "http://localhost:${LLAMACPP_PORT:-8083}/health"
+
+    # ------------------------------------------------------------------------
+    # CONTEXT-PER-SLOT ASSERTION
+    #
+    # llama-server's --ctx-size is a POOL divided across --parallel slots, so
+    # -c 32768 with -np 4 serves 8k per slot while gpu/chat/interactive and
+    # gpu/chat/bulk promise >=32k. NOTHING else in this script catches that:
+    # the container is healthy, /v1/models lists the alias, and the contract
+    # call probe below sends a SHORT prompt that succeeds at any context size.
+    # The failure surfaces only on real long prompts, in production, as a
+    # consumer-side 400 or a silent truncation.
+    #
+    # There is a second route in: -fit defaults to `on` and adjusts *unset*
+    # arguments to fit device memory, with --fit-ctx (default 4096) as the
+    # floor it may shrink context to. docker-compose.yml pins --ctx-size
+    # explicitly to immunise against that, but neither that pin nor the .env
+    # can catch a later edit that breaks the CTX_SIZE/PARALLEL ratio.
+    #
+    # So assert the LIVE value the server is actually serving, not the config.
+    # /props reports default_generation_settings.n_ctx, which is llama-server's
+    # PER-SLOT figure. /slots is the fallback: it is enabled by default,
+    # whereas --props gates only the POST form.
+    # ------------------------------------------------------------------------
+    echo -n "Checking llama.cpp context per slot... "
+    _lcbase="http://localhost:${LLAMACPP_PORT:-8083}"
+    _lcfloor="${LLAMACPP_CTX_PER_SLOT:-32768}"
+    _perslot=$(curl -s --max-time 5 "$_lcbase/props" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    v = d.get("default_generation_settings", {}).get("n_ctx")
+    print(int(v) if v is not None else "")
+except Exception:
+    print("")
+' 2>/dev/null)
+    if [ -z "$_perslot" ]; then
+        _perslot=$(curl -s --max-time 5 "$_lcbase/slots" 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(int(d[0]["n_ctx"]) if isinstance(d, list) and d and "n_ctx" in d[0] else "")
+except Exception:
+    print("")
+' 2>/dev/null)
+    fi
+
+    case "$_perslot" in
+        ''|*[!0-9]*)
+            echo -e "${YELLOW}UNKNOWN${NC}"
+            echo "  Neither /props nor /slots returned an n_ctx. The server may"
+            echo "  still be loading (weights take minutes off a rotational"
+            echo "  disk). Re-run once 'llama.cpp' above reports OK."
+            ;;
+        *)
+            if [ "$_perslot" -lt "$_lcfloor" ]; then
+                echo -e "${RED}✗ $_perslot < $_lcfloor${NC}"
+                echo -e "  ${RED}CONTRACT VIOLATION${NC} — gpu/chat/interactive and gpu/chat/bulk"
+                echo "  promise >=32768 tokens of context; gpu/chat/fast promises >=16384."
+                echo "  llama-server divides LLAMACPP_CTX_SIZE across LLAMACPP_PARALLEL"
+                echo "  slots, so raise CTX_SIZE to PARALLEL x $_lcfloor, or lower PARALLEL."
+                echo "    LLAMACPP_CTX_SIZE=${LLAMACPP_CTX_SIZE:-unset}  LLAMACPP_PARALLEL=${LLAMACPP_PARALLEL:-unset}"
+                echo "  Note: the contract probe below will still PASS — its prompts are"
+                echo "  short. Only real long prompts fail, which is why this check exists."
+            else
+                echo -e "${GREEN}✓ $_perslot >= $_lcfloor${NC}"
+            fi
+            ;;
+    esac
+fi
+
 # Check Infinity if enabled (contract embed + rerank roles)
 if [ "${ENABLE_INFINITY:-true}" = "true" ]; then
     check_endpoint "Infinity" "http://localhost:${INFINITY_PORT:-7997}/health"
