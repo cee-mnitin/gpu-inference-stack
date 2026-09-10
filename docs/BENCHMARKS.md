@@ -210,6 +210,9 @@ LiteLLM path.
 | arithmetic, forced terse | **0%** | 0.21 s |
 | arithmetic, steps + schema | **100%** | 3.81 s |
 
+The `steps + schema` row passes on the suite's *simple* case. It does **not**
+generalise — see the correction below.
+
 The grounded-QA pair matters most for a stack feeding a retrieval plane: the
 model answers from context when the answer is there **and** returns
 `NOT_IN_CONTEXT` when it is not. Hallucinating under a "answer only from
@@ -232,13 +235,53 @@ Forced terse, it answers in 6 tokens and is confidently wrong — 136.3, 137.2,
 163.1, 216.7 against a true 129.3. Given room to work it is correct, but keeps
 deliberating past 2500 tokens and never emits a clean final line.
 
-A JSON schema with a working field fixes both: it gives the model somewhere to
-compute and forces termination. **This is the pattern to use for any computed
-value**, and it matters here because `gpu/chat/bulk` and `gpu/chat/fast` set
-`enable_thinking: false` — which is precisely the terse regime.
+**CORRECTION (2026-09-10, after retesting on a harder problem).** An earlier
+version of this section claimed the schema "fixes both". It does not. That
+conclusion was generalised from one easy problem and does not hold.
 
-This is not a quant artifact to fix by moving to `IQ4_XS`; it is how the model
-behaves when denied working space.
+Retested on a realistic multi-step case — 40 MW farm, 31% capacity factor, 6%
+curtailed, ₹4.5/kWh, true answer ₹2.93 crore:
+
+| approach | result | note |
+|---|---|---|
+| prose, free-form | **₹29.4 crore** | 10x high; LaTeX, numbered steps, "Final Answer" box |
+| schema with `steps[]` | **₹29.30 crore** | same 10x error, now *visible* in step 3 |
+| schema: inputs + model-written formula | ₹0.0029 crore | all 5 input values right; formula omitted MW→kW |
+| **schema: labelled quantities only, arithmetic in code** | **₹2.9328 crore** | 4/4 exact |
+
+The prose and schema answers made the identical slip — using **3.1 instead of
+0.31** for a 31% capacity factor, a lost decimal place. Deterministic at
+temperature 0: three identical wrong answers.
+
+So what the schema actually buys is **termination and auditability**, not
+correctness. It surfaces the bad step where prose buries it under formatting.
+That is genuinely worth having, but it is not a fix.
+
+### The pattern that works
+
+**Do not consume this model's arithmetic.** Have it extract *labelled
+quantities* — value plus an enumerated unit — and keep the unit algebra and
+the formula in code you can unit-test:
+
+```python
+SCHEMA = {"rated_power": {"value": float, "unit": ["MW","kW","W"]},
+          "capacity_factor_pct": float, "curtailed_pct": float,
+          "tariff": {"value": float, "unit": ["INR/kWh","INR/MWh"]}}
+# ... model fills that in, then:
+def revenue_lost_crore(d):   # tested, owns the ×1000 and the ÷1e7
+    ...
+```
+
+Extraction is what this model is reliable at — 4/4 exact on the same problem,
+and 100% on the invoice-extraction case above. Arithmetic is what it is not.
+Note the failures were *units and decimals*, never the extracted values.
+
+Also not a quant artifact: moving to `IQ4_XS` would not address a lost decimal
+place.
+
+Relevant to role config: `gpu/chat/bulk` and `gpu/chat/fast` set
+`enable_thinking: false`, which is the terse regime where the prose failure is
+worst.
 
 `UD-Q3_K_XL` was chosen for residency over fidelity, so 100% on tool calling
 and structured output at Q3 is the load-bearing result: it removes the reason
@@ -249,8 +292,10 @@ to move to `IQ4_XS` and accept expert offload.
 3. **Concurrency beyond `PARALLEL` is strictly worse**, not a latency /
    throughput trade — throughput fell from 166.4 to 158.7 t/s while TTFT went
    from 933 ms to 4623 ms.
-4. **Computed values need a schema with a working field.** Forced-terse
-   arithmetic was 0/5 and confidently wrong.
+4. **Do not consume this model's arithmetic.** Forced-terse was 0/5 and
+   confidently wrong; a `steps[]` schema made the error auditable but still
+   wrong (10x, from 3.1 vs 0.31). Extracting labelled quantities and computing
+   in code was 4/4 exact. Extraction is reliable; arithmetic is not.
 
 1. **Per-slot context must exceed the contract floor.** At exactly 32768 a
    real 32k prompt was rejected — `request (33366 tokens) exceeds the
