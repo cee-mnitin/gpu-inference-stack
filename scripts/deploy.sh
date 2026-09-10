@@ -87,9 +87,17 @@ echo ""
 echo "Active profiles: $PROFILES"
 echo ""
 
-# Pull images
+# Pull images.
+# --ignore-buildable: litellm is built from config/litellm/Dockerfile (it needs
+# Pillow for the Ollama vision path), so it has no upstream tag to pull. Under
+# `set -e` a pull that trips over a locally-built image aborts the whole deploy.
 echo "Pulling Docker images..."
-COMPOSE_PROFILES="$PROFILES" docker compose -f "$PROJECT_ROOT/docker-compose.yml" pull
+COMPOSE_PROFILES="$PROFILES" docker compose -f "$PROJECT_ROOT/docker-compose.yml" \
+    pull --ignore-buildable
+
+echo ""
+echo "Building local images..."
+COMPOSE_PROFILES="$PROFILES" docker compose -f "$PROJECT_ROOT/docker-compose.yml" build
 
 echo ""
 echo -e "${GREEN}Starting services...${NC}"
@@ -98,6 +106,41 @@ COMPOSE_PROFILES="$PROFILES" docker compose -f "$PROJECT_ROOT/docker-compose.yml
 echo ""
 echo "Waiting for services to initialize (this may take 2-5 minutes for vLLM)..."
 sleep 30
+
+# ---------------------------------------------------------------------------
+# Pull the Ollama models this box is configured to serve.
+#
+# Nothing else does this. OLLAMA_PRELOAD_MODELS and OLLAMA_VISION_MODEL were
+# documented as configuration but never acted on, so a fresh deploy published
+# the gpu/chat/vision alias in front of a model Ollama did not have — LiteLLM
+# resolves the alias, Ollama 404s on the pull-less model name, and the
+# consumer sees a vision failure that looks like a routing bug.
+# ---------------------------------------------------------------------------
+if [ "${ENABLE_OLLAMA}" = "true" ]; then
+    OLLAMA_MODELS_TO_PULL="${OLLAMA_PRELOAD_MODELS:-} ${OLLAMA_VISION_MODEL:-}"
+    if [ -n "${OLLAMA_MODELS_TO_PULL// /}" ]; then
+        echo ""
+        echo "Pulling Ollama models..."
+        # Wait for the API before pulling; a cold container is not up at +30s.
+        for _ in $(seq 1 30); do
+            docker exec ollama ollama list >/dev/null 2>&1 && break
+            sleep 5
+        done
+        for model in $(echo "$OLLAMA_MODELS_TO_PULL" | tr -d '"' | tr ' ' '\n' | sort -u); do
+            [ -z "$model" ] && continue
+            if docker exec ollama ollama list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$model"; then
+                echo -e "  ${GREEN}✓${NC} $model (already present)"
+                continue
+            fi
+            echo "  pulling $model ..."
+            if docker exec ollama ollama pull "$model"; then
+                echo -e "  ${GREEN}✓${NC} $model"
+            else
+                echo -e "  ${RED}✗ $model failed to pull${NC} — gpu/chat/vision will not serve"
+            fi
+        done
+    fi
+fi
 
 # Check service health
 echo ""

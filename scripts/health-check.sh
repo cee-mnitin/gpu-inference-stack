@@ -128,6 +128,87 @@ else
     done
 fi
 
+
+# ============================================================================
+# CONTRACT CALL PROBE  —  does each alias actually SERVE, not just resolve?
+# ============================================================================
+# A name in /v1/models proves routing config exists. It does not prove a
+# single request through it succeeds, and the gap is not theoretical: with a
+# LiteLLM that lacks Pillow, gpu/chat/vision lists fine, Ollama is healthy and
+# holds the model, the listing check above prints ✓ — and every real vision
+# call dies with "ollama image conversion failed please run `pip install
+# Pillow`". Same shape for a wrong served-model-name behind a healthy vLLM, or
+# an Infinity started embed-only (400 on /rerank).
+#
+# So issue the smallest real request of each KIND. Skip with CONTRACT_PROBE=0.
+if [ "${CONTRACT_PROBE:-1}" = "1" ] && [ -n "$_served" ]; then
+    echo ""
+    echo "Contract call probe (one real request per alias):"
+    _base="http://localhost:${LITELLM_PORT:-8080}"
+    _auth="Authorization: Bearer ${LITELLM_MASTER_KEY}"
+
+    # Reports one line per alias. $1 alias, $2 endpoint path, $3 JSON body.
+    # A pass is a 200 whose body carries no "error" key: LiteLLM answers some
+    # upstream failures 200-with-error-body, so status alone is not enough.
+    _probe_call() {
+        local alias="$1" path="$2" body="$3"
+        if ! echo "$_served" | grep -qx "$alias"; then
+            echo -e "  ${YELLOW}-${NC} $alias ${YELLOW}(not served — skipped)${NC}"
+            return 0
+        fi
+        printf '  probing %s ... ' "$alias"
+        local out
+        out=$(curl -s -m 300 -X POST "$_base$path" \
+              -H "$_auth" -H 'Content-Type: application/json' -d "$body" 2>&1)
+        if echo "$out" | grep -q '"error"'; then
+            echo -e "${RED}✗ FAILED${NC}"
+            # First line of the message is what an operator needs; the rest is
+            # a Python traceback that buries it.
+            echo "$out" | tr ',' '\n' | grep -m1 '"message"' | cut -c1-200 | sed 's/^/      /'
+            _probe_failed=1
+            return 1
+        fi
+        if [ -z "$out" ]; then
+            echo -e "${RED}✗ FAILED (empty response / timeout)${NC}"
+            _probe_failed=1
+            return 1
+        fi
+        echo -e "${GREEN}✓${NC}"
+    }
+
+    _probe_failed=0
+
+    # One chat probe covers interactive/bulk/fast: they are the same KIND of
+    # call and often the same deployment, but each is probed because the whole
+    # point of separate aliases is that they MAY differ per server.
+    for _a in gpu/chat/interactive gpu/chat/bulk gpu/chat/fast; do
+        _probe_call "$_a" /v1/chat/completions \
+          "{\"model\":\"$_a\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":2048,\"temperature\":0}"
+    done
+
+    _probe_call gpu/embed/bge-m3 /v1/embeddings \
+      '{"model":"gpu/embed/bge-m3","input":["health check"]}'
+
+    # Rerank is probed separately because it is the asymmetric URL: LiteLLM
+    # appends /v1 itself, so a base that already ends in /v1 makes this the
+    # ONLY call type that breaks (404 on /v1/v1/rerank) — silently degrading a
+    # consumer's retrieval to un-reranked order rather than erroring.
+    _probe_call gpu/rerank/bge-reranker-v2-m3 /v1/rerank \
+      '{"model":"gpu/rerank/bge-reranker-v2-m3","query":"q","documents":["a","b"],"top_n":2}'
+
+    # A 1x1 red PNG, inline: the vision path's real failure is image DECODING
+    # in the proxy, so the probe has to carry an actual image.
+    _px='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='
+    _probe_call gpu/chat/vision /v1/chat/completions \
+      "{\"model\":\"gpu/chat/vision\",\"max_tokens\":2048,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"describe\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,$_px\"}}]}]}"
+
+    if [ "$_probe_failed" = "1" ]; then
+        echo -e "  ${RED}One or more aliases resolve but do not serve.${NC}"
+        echo -e "  ${YELLOW}Do not point a consumer at this box until they pass:${NC}"
+        echo -e "  ${YELLOW}a listed-but-broken alias passes a consumer's boot check and fails at request time.${NC}"
+    fi
+fi
+
 echo ""
 echo "GPU Status:"
 nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits 2>/dev/null || echo "nvidia-smi not available"
