@@ -285,10 +285,10 @@ model_list:
   # ============================================================================
   # DOCKERIZED VLLM MODELS (from this stack)
   # ============================================================================
-  - model_name: qwen2.5-14b-vllm-docker
+  - model_name: qwen3.6-vllm-docker
     litellm_params:
-      model: openai/qwen2.5-14b-vllm
-      api_base: http://vllm:8000/v1
+      model: openai/qwen3.6
+      api_base: http://vllm-new:8000/v1
       api_key: "EMPTY"
       timeout: 600
     model_info:
@@ -296,6 +296,7 @@ model_list:
       supports_function_calling: true
       supports_vision: false
       supports_parallel_function_calling: true
+      supports_reasoning: true
 
   # ============================================================================
   # EXISTING VLLM INFRASTRUCTURE (Docker containers with router)
@@ -327,24 +328,29 @@ model_list:
       supports_parallel_function_calling: true
 
   # ============================================================================
-  # EMBEDDINGS (native services)
+  # EMBEDDINGS (native TEI services - OpenAI compatible)
   # ============================================================================
   - model_name: bge-m3-native
     litellm_params:
-      model: huggingface/BAAI/bge-m3
-      api_base: http://host.docker.internal:8082
+      model: openai/BAAI/bge-m3
+      api_base: http://host.docker.internal:8081/v1
+      api_key: "EMPTY"
     model_info:
       mode: embedding
       input_cost_per_token: 0.0
       output_cost_per_token: 0.0
 
-  # Optional: Dockerized embeddings (if enabled)
-  # - model_name: bge-m3-docker
-  #   litellm_params:
-  #     model: huggingface/BAAI/bge-m3
-  #     api_base: http://embeddings:80
-  #   model_info:
-  #     mode: embedding
+  # ============================================================================
+  # RERANKER (native TEI services)
+  # ============================================================================
+  - model_name: bge-reranker-v2-m3-native
+    litellm_params:
+      model: huggingface/BAAI/bge-reranker-v2-m3
+      api_base: http://host.docker.internal:8082
+    model_info:
+      mode: rerank
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
 
 # ============================================================================
 # LITELLM SETTINGS

@@ -29,16 +29,7 @@ services:
       - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-4}
       - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-2}
       - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
-      # 24h was hardcoded here, which defeated the reason vision lives on
-      # Ollama at all. config/litellm/config.yaml says gpu/chat/vision is
-      # "Backed by Ollama rather than vLLM: the VL model is a secondary,
-      # low-volume model and Ollama can swap it in and out without taking VRAM
-      # from the chat model" — a 24h keep-alive pins it resident instead, so
-      # the first vision call permanently costs the box ~10 GB. On a 32 GB
-      # card co-tenanted with vLLM and Infinity that left under 1 GB free.
-      # A short idle unload is the behaviour the design assumes; raise it on a
-      # box with VRAM to spare, or where vision is high-volume.
-      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+      - OLLAMA_KEEP_ALIVE=24h
     deploy:
       resources:
         reservations:
@@ -49,11 +40,7 @@ services:
     networks:
       - gpu-inference-net
     healthcheck:
-      # `ollama list`, not curl: this image ships NEITHER curl NOR wget, so the
-      # old probe exited 127 on every run and the container was permanently
-      # `unhealthy` while the API answered 200 on :11434. The bundled CLI
-      # queries that same local API and is guaranteed present.
-      test: ["CMD", "ollama", "list"]
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -69,16 +56,7 @@ services:
   # Enhanced to match/replace existing vllm-qwen36 container with all features
   # ============================================================================
   vllm:
-    # The RUNTIME is part of what a deployment picks, alongside the weights: a
-    # box's GPU generation decides which vLLM builds can run on it at all.
-    # sm_120 (Blackwell RTX PRO / 50-series) needs a CUDA 12.8+ build, and a
-    # too-old image does not degrade — every request dies with "no kernel image
-    # is available for execution on the device". So pin a default and let the
-    # box override it, rather than making a hardware constraint a YAML edit.
-    # Check a candidate before deploying:
-    #   docker run --rm --gpus all --entrypoint python3 <image> \
-    #     -c "import torch; print(torch.cuda.get_arch_list())"
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.23.0}
+    image: vllm/vllm-openai:v0.23.0  # Same version as existing for compatibility
     container_name: vllm-new
     profiles:
       - vllm
@@ -109,44 +87,14 @@ services:
       - ${VLLM_MAX_NUM_SEQS:-62}
       - --tensor-parallel-size
       - ${VLLM_TENSOR_PARALLEL_SIZE:-1}
-      # These three are argparse BooleanOptionalAction flags, so each has a
-      # --no-enable-* twin and neither form takes a value. compose can neither
-      # branch on a boolean nor word-split a string into argv, so the VALUE of
-      # each variable is the literal flag. Defaults keep the previous
-      # behaviour; a box overrides the one it needs to drop.
-      #
-      # --enable-expert-parallel is the one that matters: it is MoE-only, and
-      # vLLM does not warn and carry on — it refuses to start ("Number of
-      # experts in the model must be greater than 0 when expert parallelism is
-      # enabled"). Hardcoded, it made every dense model unservable, which is
-      # the opposite of this stack's premise that the deployment picks the
-      # weights. A dense box sets VLLM_EXPERT_PARALLEL_FLAG to the --no- form.
-      - ${VLLM_PREFIX_CACHING_FLAG:---enable-prefix-caching}
-      - ${VLLM_CHUNKED_PREFILL_FLAG:---enable-chunked-prefill}
-      - ${VLLM_EXPERT_PARALLEL_FLAG:---enable-expert-parallel}
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --enable-expert-parallel
       - --enable-auto-tool-choice
-      # Parsers follow the WEIGHTS, so they cannot be hardcoded: this stack's
-      # whole premise is that each box fills the contract roles with whatever
-      # model it can run. qwen3_xml is the Qwen3.6/Coder XML tool format and
-      # silently mis-parses a dense Qwen3's hermes-style tool calls — the
-      # request succeeds and the tool call is simply lost.
-      # Structured-output decoding. disable_any_whitespace is the load-bearing
-      # part, and it needs the backend pinned (it is rejected on any backend
-      # but xgrammar/guidance, and the default `auto` is neither).
-      #
-      # Without it, a JSON grammar permits UNBOUNDED whitespace between
-      # tokens, and a model can fall into emitting nothing else: observed live
-      # as `{"event_date": "2026-04-08"` followed by ~130,000 blank lines
-      # until max_tokens, surfacing to the consumer as an intermittent
-      # "Expecting ',' delimiter" parse failure that costs a full generation
-      # plus a repair retry. Newlines are cheap multi-character BPE tokens, so
-      # a 4k budget buys a lot of whitespace.
-      - --structured-outputs-config
-      - '${VLLM_STRUCTURED_OUTPUTS_CONFIG:-{"backend": "xgrammar", "disable_any_whitespace": true}}'
       - --tool-call-parser
-      - ${VLLM_TOOL_CALL_PARSER:-qwen3_xml}
+      - qwen3_xml
       - --reasoning-parser
-      - ${VLLM_REASONING_PARSER:-qwen3}
+      - qwen3
     deploy:
       resources:
         reservations:
@@ -201,218 +149,6 @@ services:
         max-file: "${MAX_LOG_FILES:-5}"
 
   # ============================================================================
-  # LLAMA.CPP - GGUF inference (Qwen3-Next-80B-A3B here, Flash-Next elsewhere)
-  # ============================================================================
-  # MUTUALLY EXCLUSIVE WITH vllm. Neither box in this fleet can host both: the
-  # A6000's UD-Q3_K_XL weights are 33.19 GiB of 48 GB and the Blackwell box's
-  # Flash-Next is 76.3 GiB of 97 GB, with vLLM wanting ~31 GB on top of either.
-  # scripts/deploy.sh refuses to start both — see ALLOW_VLLM_LLAMACPP_COTENANCY.
-  #
-  # Why llama.cpp is here at all, alongside vLLM: the A6000 is sm_86 (Ampere,
-  # no FP8/FP4 tensor cores), so the FP8/NVFP4 quants the modern vLLM recipes
-  # assume have no native path on it. And for the qwen4exp architecture
-  # (Qwen3.8-Flash-Next), vLLM's host-memory PLE prefetch is still an open
-  # feature request while llama.cpp's -ncmoe/-ot CPU offload is mature.
-  llamacpp:
-    # Pinned by BUILD NUMBER, not :latest, and the number is not arbitrary.
-    #   - b10884 is the newest PUBLISHED build (the registry has images for
-    #     only 521 of the server-cuda-b* builds, so most numbers do not
-    #     resolve — b10665 returns `manifest unknown`). It is also the build
-    #     actually pulled and flag-verified on the A6000.
-    #   - The Blackwell profile overrides this to b10644, because
-    #     ggml-org/llama.cpp#28355 (OPEN, filed 2026-09-04) reports the 51B
-    #     PLE n-gram table failing to load on builds newer than 10665,
-    #     causing extremely slow prefill. b10644 is the newest published
-    #     build at or below 10665; b10666 is skipped deliberately, being one
-    #     past the last known-good number.
-    # Qwen3-Next-80B-A3B is NOT affected by #28355 (its support landed at
-    # b7186), which is why the default here is the newer build.
-    #
-    # Like VLLM_IMAGE above, the runtime is part of what a deployment picks:
-    # a too-old CUDA build does not degrade, every request dies with "no
-    # kernel image is available for execution on the device". Verify on the
-    # box before deploying:
-    #   docker run --rm --entrypoint sh <image> -c '/app/llama-server --version'
-    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b10884}
-    container_name: llamacpp
-    profiles:
-      - llamacpp
-    restart: unless-stopped
-    ports:
-      # LOOPBACK BY DEFAULT, and that is a security decision.
-      #
-      # llama-server has no authentication here and sets CORS to '*' — it says
-      # so itself on every boot:
-      #   CORS is set to allow all origins ('*') and no API key is set
-      #   this can be a security risk (cross-origin attacks)
-      #
-      # Published on 0.0.0.0 it was reachable over both the LAN and Netbird
-      # (verified: HTTP 200 on 192.168.3.40:8083 and 100.117.227.40:8083),
-      # which hands anyone on those networks the model directly — bypassing
-      # LiteLLM's virtual keys, per-consumer spend tracking, rate limits and
-      # the gpu/<task>/<role> contract altogether.
-      #
-      # LiteLLM never needs this port: it reaches the server as
-      # http://llamacpp:8080 on the compose network. The host publish exists
-      # only for local debugging and for scripts/benchmark.sh --direct. So
-      # bind it to loopback and let a box opt into wider exposure explicitly.
-      # Same reasoning as LITELLM_BIND_ADDR, which this file already documents.
-      - "${LLAMACPP_BIND_ADDR:-127.0.0.1}:${LLAMACPP_PORT:-8083}:8080"
-    volumes:
-      # Read-only: the server has no reason to write to the weights directory.
-      - ${LLAMACPP_MODELS_DIR:-./data/llamacpp/models}:/models:ro
-    # NO `command:`, deliberately. llama-server exposes LLAMA_ARG_* env vars
-    # for 138 flags, so every knob is an environment entry with a compose
-    # default. That sidesteps the problem the VLLM_*_FLAG comments above
-    # document at length: compose can neither branch on a boolean nor
-    # word-split a string into argv, which forces ugly "the value IS the
-    # flag" tricks. Here a box overrides one variable in .env instead.
-    environment:
-      # ── Model ────────────────────────────────────────────────────────────
-      - LLAMA_ARG_MODEL=/models/${LLAMACPP_MODEL_FILE:?LLAMACPP_MODEL_FILE must name a .gguf under LLAMACPP_MODELS_DIR}
-      # The LiteLLM target: CONTRACT_*_MODEL is openai/<this value>. Unlike
-      # vLLM's --served-model-name, a mismatch here is benign — llama-server
-      # serves a single model and ignores the request's `model` field.
-      - LLAMA_ARG_ALIAS=${LLAMACPP_MODEL_NAME:-llamacpp}
-      - LLAMA_ARG_HOST=0.0.0.0
-      - LLAMA_ARG_PORT=8080
-      #
-      # ── Context: EXPLICIT, and that is load-bearing ──────────────────────
-      # --ctx-size is a POOL divided across --parallel slots. So -c 32768
-      # with -np 4 serves 8k per slot while gpu/chat/interactive and
-      # gpu/chat/bulk promise >=32k. Nothing cheap catches that: /v1/models
-      # lists the alias, the container is healthy, and health-check.sh's
-      # contract probe sends a SHORT prompt that succeeds at any context
-      # size. Only real long prompts fail, in production.
-      #
-      # Worse, -fit defaults to ON and adjusts *unset* arguments to fit
-      # device memory, with --fit-ctx (default 4096) as the floor it may
-      # shrink context to. Setting CTX_SIZE explicitly immunises against
-      # that, because fit only touches unset args. FIT_CTX is the second line
-      # of defence if someone ever unsets CTX_SIZE.
-      #
-      # 163840 / 4 slots = 40960 per slot — deliberately ABOVE the 32768
-      # contract floor. The floor is on USABLE context, and prompt AND
-      # generation are charged to the same slot, so at exactly 32768 a real
-      # 32k prompt has no room to answer and is rejected outright:
-      #   request (33366 tokens) exceeds the available context size (32768)
-      # 40960 leaves 8192 tokens of generation headroom, for ~0.75 GiB more KV.
-      # scripts/health-check.sh asserts the LIVE per-slot value, because
-      # neither of the two settings below can catch later config drift.
-      - LLAMA_ARG_CTX_SIZE=${LLAMACPP_CTX_SIZE:-163840}
-      - LLAMA_ARG_N_PARALLEL=${LLAMACPP_PARALLEL:-4}
-      - LLAMA_ARG_FIT_CTX=${LLAMACPP_FIT_CTX:-163840}
-      #
-      # DO NOT add LLAMA_ARG_KV_UNIFIED_PER_SLOT here. It reads like a floor
-      # and is actually a CAP — the server logs
-      #   srv load_model: capping per-slot context (131072) to
-      #   --kv-unified-per-slot (32768)
-      # so setting it to the contract minimum can only ever REDUCE context,
-      # never protect it. On a 1-slot/128k profile it silently cut per-slot
-      # context 4x, destroying exactly the long-context capability that
-      # deployment exists for — and an assertion checking ">= 32768" passes.
-      # CTX_SIZE and N_PARALLEL already determine per-slot context exactly.
-      # LLAMACPP_CTX_PER_SLOT survives only as health-check.sh's floor.
-      #
-      # ── Residency ────────────────────────────────────────────────────────
-      # LAZY_MODE=off is MANDATORY on the A6000. Its default is `auto`, which
-      # means "read the rows of tensors larger than 4 GiB from disk on demand
-      # instead of keeping them resident (requires mmap)". That box has NO
-      # NVMe — /dev/sda is a rotational SAS logical volume — so on-demand
-      # tensor reads are seek-bound. With 251 GB of RAM, residency is free.
-      # This is also a plausible mechanism for #28355's slow-prefill symptom.
-      - LLAMA_ARG_LAZY_MODE=${LLAMACPP_LAZY_MODE:-off}
-      - LLAMA_ARG_LOAD_MODE=${LLAMACPP_LOAD_MODE:-mmap}
-      #
-      # ── Fit: ON, deliberately ────────────────────────────────────────────
-      # N_CPU_MOE and N_GPU_LAYERS are intentionally left UNSET so that
-      # `fit on` measures free VRAM at boot and offloads only the experts
-      # that do not fit. The service then adapts when Infinity's footprint
-      # moves, whereas a hardcoded -ncmoe tuned once goes stale and fails
-      # CLOSED (OOM) rather than degrading. Set either to pin startup.
-      #
-      # NOTE THE ODD SYNTAX BELOW, and do not "simplify" it to `=${VAR:-}`.
-      # An empty LLAMA_ARG_* value is NOT treated as unset — llama-server
-      # parses it and dies:
-      #   error while handling environment variable
-      #   "LLAMA_ARG_N_CPU_MOE": invalid value
-      # and because `restart: unless-stopped` is set, that becomes a crash
-      # loop rather than a visible one-shot failure. Verified against
-      # b10884: every numeric and enum LLAMA_ARG_* rejects empty; only
-      # MMPROJ and ALIAS tolerate it.
-      #
-      # `VAR${X:+=${X}}` renders as the BARE name `VAR` when X is empty,
-      # which is compose's pass-through form — and since the name is not in
-      # the host environment, the variable is omitted from the container
-      # entirely. When X is set it renders as `VAR=value` as normal.
-      - LLAMA_ARG_FIT=${LLAMACPP_FIT:-on}
-      - LLAMA_ARG_FIT_TARGET=${LLAMACPP_FIT_TARGET:-2048}
-      - LLAMA_ARG_N_CPU_MOE${LLAMACPP_NCMOE:+=${LLAMACPP_NCMOE}}
-      - LLAMA_ARG_N_GPU_LAYERS${LLAMACPP_NGL:+=${LLAMACPP_NGL}}
-      #
-      # ── Attention / KV ───────────────────────────────────────────────────
-      # f16 KV, not q8_0: PR #27742 reports -ctk/-ctv q8_0 assertion failures
-      # on the qwen4exp arch. q8_0 is a measured optimisation, not a default.
-      - LLAMA_ARG_FLASH_ATTN=${LLAMACPP_FLASH_ATTN:-on}
-      - LLAMA_ARG_CACHE_TYPE_K=${LLAMACPP_CACHE_TYPE_K:-f16}
-      - LLAMA_ARG_CACHE_TYPE_V=${LLAMACPP_CACHE_TYPE_V:-f16}
-      #
-      # ── Throughput ───────────────────────────────────────────────────────
-      # THREADS matters only when fit decides to offload experts to CPU.
-      # CACHE_REUSE is llama.cpp's analogue of vLLM's --enable-prefix-caching
-      # and defaults to 0 (disabled) upstream.
-      - LLAMA_ARG_THREADS=${LLAMACPP_THREADS:-16}
-      - LLAMA_ARG_CACHE_REUSE=${LLAMACPP_CACHE_REUSE:-256}
-      #
-      # ── API surface the contract needs ───────────────────────────────────
-      # JINJA gives tool calling (already default-on in b10884; explicit so a
-      # future default flip cannot silently drop the contract's tool support).
-      # REASONING=auto extracts thought tags into `reasoning_content` instead
-      # of leaking <think> into content — the equivalent of vLLM's
-      # --reasoning-parser qwen3. METRICS is off upstream by default and is
-      # what config/prometheus/prometheus.yml scrapes.
-      - LLAMA_ARG_JINJA=1
-      - LLAMA_ARG_REASONING=${LLAMACPP_REASONING:-auto}
-      - LLAMA_ARG_ENDPOINT_METRICS=1
-      #
-      # ── Per-model extras (both unset on the A6000) ───────────────────────
-      # OVERRIDE_TENSOR places Flash-Next's 51B PLE table in host memory
-      # rather than on the GPU or streamed from disk; MMPROJ adds its vision
-      # tower. Qwen3-Next-80B-A3B needs neither, so both are omitted here
-      # via the same pass-through form documented above — OVERRIDE_TENSOR in
-      # particular rejects an empty value outright.
-      - LLAMA_ARG_OVERRIDE_TENSOR${LLAMACPP_OVERRIDE_TENSOR:+=${LLAMACPP_OVERRIDE_TENSOR}}
-      - LLAMA_ARG_MMPROJ${LLAMACPP_MMPROJ:+=${LLAMACPP_MMPROJ}}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['${LLAMACPP_GPU_DEVICES:-${GPU_DEVICES:-0}}']
-              capabilities: [gpu]
-    networks:
-      - gpu-inference-net
-    healthcheck:
-      # curl, and that was CHECKED rather than assumed: this image ships curl
-      # and python3 but NOT wget or nc. Both `ollama` and `litellm` in this
-      # file carry scars from probes that referenced absent binaries and left
-      # the container permanently `unhealthy` while the API served 200s.
-      # Re-run on any image bump:
-      #   docker run --rm --entrypoint sh <image> -c 'command -v curl wget python3'
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 10
-      # 15 min, longer than vLLM's 10. Reading 33 GiB of weights off the
-      # A6000 box's rotational SAS array takes minutes before warmup starts.
-      start_period: ${LLAMACPP_START_PERIOD:-900s}
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "${MAX_LOG_SIZE:-100m}"
-        max-file: "${MAX_LOG_FILES:-5}"
-
-  # ============================================================================
   # TEXT EMBEDDINGS - Embedding Generation Service
   # ============================================================================
   embeddings:
@@ -456,68 +192,6 @@ services:
         max-file: "${MAX_LOG_FILES:-5}"
 
   # ============================================================================
-  # INFINITY - Embeddings + Reranking (single container, both models)
-  # ============================================================================
-  # Serves the two models ember-ai's retrieval plane is built on:
-  #   BAAI/bge-m3               → gpu/embed/bge-m3            (1024-dim)
-  #   BAAI/bge-reranker-v2-m3   → gpu/rerank/bge-reranker-v2-m3 (cross-encoder)
-  #
-  # Why Infinity and not the `embeddings` (TEI) service above:
-  #   1. TEI serves ONE model per container, and has no reranker wired here at
-  #      all — a cross-encoder would need a second TEI instance. Infinity serves
-  #      both from one process, and LiteLLM has an `infinity` provider for both
-  #      the embedding and the rerank mode.
-  #   2. Embedding vectors are DATA, not a preference. A consumer's vector index
-  #      is built with a specific embedder; "same weights, different server
-  #      build" is not a guarantee of identical vectors (pooling/normalisation
-  #      can differ between runtimes). ember-ai's corpus was embedded through
-  #      Infinity bge-m3, so serving it through Infinity keeps the vector space
-  #      bit-identical. Re-pointing embeddings at TEI is a re-index, not a
-  #      config change.
-  #
-  # BOTH --model-id flags are mandatory. An Infinity loaded in embed-only mode
-  # returns 400 on /rerank — a real failure mode that silently degrades a
-  # consumer's retrieval to un-reranked fusion order rather than erroring
-  # loudly.
-  infinity:
-    image: michaelf34/infinity:0.0.77
-    container_name: infinity
-    profiles:
-      - infinity
-    restart: unless-stopped
-    ports:
-      - "${INFINITY_PORT:-7997}:7997"
-    command: ${INFINITY_CMD:-v2 --model-id BAAI/bge-m3 --model-id BAAI/bge-reranker-v2-m3 --port 7997}
-    volumes:
-      # HF_HOME inside the image is /app/.cache/huggingface. Mounting anywhere
-      # else re-downloads ~13 GB of weights on every restart.
-      - ${HF_HOME:-./data/huggingface}:/app/.cache/huggingface
-    environment:
-      - INFINITY_QUEUE_SIZE=${INFINITY_QUEUE_SIZE:-512}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['${GPU_DEVICES:-0}']
-              capabilities: [gpu]
-    networks:
-      - gpu-inference-net
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7997/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      # Warm cache: 60-120s to load + warm both models. First-ever boot
-      # downloads ~13 GB and takes ~7 min.
-      start_period: 600s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "${MAX_LOG_SIZE:-100m}"
-        max-file: "${MAX_LOG_FILES:-5}"
-
-  # ============================================================================
   # REDIS - Caching Layer for LiteLLM
   # ============================================================================
   redis:
@@ -551,28 +225,13 @@ services:
   # LITELLM - Unified LLM Gateway
   # ============================================================================
   litellm:
-    # Built, not pulled: config/litellm/Dockerfile adds Pillow to the upstream
-    # image. LiteLLM needs it to convert images for the OLLAMA backend, which
-    # is what backs the gpu/chat/vision contract alias by default — without it
-    # every vision call fails with "ollama image conversion failed please run
-    # `pip install Pillow`" while /v1/models still lists the alias and
-    # health-check.sh still reports it ✓.
-    build:
-      context: ./config/litellm
-      dockerfile: Dockerfile
-    image: gpu-inference-stack-litellm:latest
+    image: ghcr.io/berriai/litellm:main-latest
     container_name: litellm
     restart: unless-stopped
     ports:
-      # Consumers reach this over LAN/Netbird, so it cannot be loopback-only.
-      # Pin LITELLM_BIND_ADDR to the Netbird or LAN interface (e.g.
-      # 100.117.227.85) to keep the gateway off every other interface on the
-      # box; 0.0.0.0 exposes it on all of them.
-      - "${LITELLM_BIND_ADDR:-0.0.0.0}:${LITELLM_PORT:-8080}:4000"
+      - "${LITELLM_PORT:-8080}:4000"
     volumes:
-      # Read-only: the container has no reason to rewrite its own config, and
-      # this gateway is reachable from other hosts.
-      - ./config/litellm:/app/config:ro
+      - ./config/litellm:/app/config
     environment:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-1234567890abcdef}
       - DATABASE_URL=postgresql://litellm:litellm@postgres:5432/litellm
@@ -581,43 +240,7 @@ services:
       - REQUEST_TIMEOUT=${LITELLM_REQUEST_TIMEOUT:-600}
       - REDIS_HOST=${LITELLM_REDIS_HOST:-redis}
       - REDIS_PORT=${LITELLM_REDIS_PORT:-6379}
-      # ── Ember contract role bindings ──────────────────────────────────
-      # Which model/backend on THIS box fills each gpu/<task>/<role> alias
-      # (see the contract block at the top of config/litellm/config.yaml).
-      # Override any of these in .env to re-fill a role without editing YAML.
-      # Defaults: chat roles → the local vLLM, vision → local Ollama,
-      # embed/rerank → the local Infinity.
-      - CONTRACT_INTERACTIVE_MODEL=${CONTRACT_INTERACTIVE_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
-      - CONTRACT_INTERACTIVE_API_BASE=${CONTRACT_INTERACTIVE_API_BASE:-http://vllm:8000/v1}
-      # `bulk` defaults to the SAME deployment as `interactive`. They are
-      # separate aliases so a consumer can place them on different servers,
-      # not because a box must serve two chat models.
-      - CONTRACT_BULK_MODEL=${CONTRACT_BULK_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
-      - CONTRACT_BULK_API_BASE=${CONTRACT_BULK_API_BASE:-http://vllm:8000/v1}
-      - CONTRACT_FAST_MODEL=${CONTRACT_FAST_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
-      - CONTRACT_FAST_API_BASE=${CONTRACT_FAST_API_BASE:-http://vllm:8000/v1}
-      - CONTRACT_VISION_ALIAS=${CONTRACT_VISION_ALIAS:-gpu/chat/vision}
-      - CONTRACT_VISION_MODEL=${CONTRACT_VISION_MODEL:-ollama/${OLLAMA_VISION_MODEL:-gemma3:12b}}
-      - CONTRACT_VISION_API_BASE=${CONTRACT_VISION_API_BASE:-http://ollama:11434}
-      - CONTRACT_EMBED_API_BASE=${CONTRACT_EMBED_API_BASE:-http://infinity:7997}
-      - CONTRACT_RERANK_API_BASE=${CONTRACT_RERANK_API_BASE:-http://infinity:7997}
-      - CONTRACT_OCR_API_BASE=${CONTRACT_OCR_API_BASE:-http://vllm:8000/v1}
-    # LOG LEVEL IS A PRODUCTION SETTING, not a convenience.
-    #
-    # --detailed_debug was unconditional here. It logs full request bodies —
-    # measured 25,309 log lines with entire 30k-token prompts inline — which
-    # has two costs beyond noise:
-    #   1. Latency. TTFT through the gateway measured 917ms p50 against 290ms
-    #      straight to llama.cpp, with IDENTICAL per-token latency (9.4 vs
-    #      9.6ms). All ~600ms of that was request-setup overhead, and it lands
-    #      squarely on gpu/chat/fast, the role that exists for latency.
-    #   2. Data retention. With the logging limits below (100m x 5 files) this
-    #      can hold up to 500 MB of verbatim consumer prompts on disk, on a
-    #      box serving MULTIPLE consumers. A debug flag should not silently
-    #      become a data-retention decision.
-    #
-    # Set LITELLM_LOG_LEVEL=debug to get it back while diagnosing something.
-    command: --config /app/config/config.yaml --port 4000 ${LITELLM_DEBUG_FLAG:-}
+    command: --config /app/config/config.yaml --port 4000 --detailed_debug
     depends_on:
       redis:
         condition: service_healthy
@@ -626,23 +249,11 @@ services:
     networks:
       - gpu-inference-net
     healthcheck:
-      # python3, not curl: the litellm image has no curl, so the old check
-      # exited 127 ("executable file not found") on every probe and the
-      # container sat permanently `unhealthy` while serving 200s. A constant
-      # health signal is worse than none — it cannot report a gateway that has
-      # genuinely died, and it makes `depends_on: service_healthy` unusable
-      # against this service.
-      #
-      # /health/liveliness, not /health: /health is the ADMIN endpoint that
-      # probes every configured deployment (it needs a key, and on this box it
-      # would fire real requests at vLLM, Ollama and Infinity every 30s).
-      # /health/liveliness is the unauthenticated "is the process up" check.
-      test: ["CMD", "python3", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=5)"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=5)\""]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
@@ -779,7 +390,7 @@ services:
     container_name: node-exporter
     restart: unless-stopped
     ports:
-      - "${NODE_EXPORTER_PORT:-9100}:9100"
+      - "9100:9100"
     command:
       - '--path.procfs=/host/proc'
       - '--path.sysfs=/host/sys'
@@ -805,7 +416,7 @@ services:
     container_name: dcgm-exporter
     restart: unless-stopped
     ports:
-      - "${DCGM_EXPORTER_PORT:-9400}:9400"
+      - "9400:9400"
     deploy:
       resources:
         reservations:
@@ -831,7 +442,7 @@ services:
     container_name: redis-exporter
     restart: unless-stopped
     ports:
-      - "${REDIS_EXPORTER_PORT:-9121}:9121"
+      - "9121:9121"
     environment:
       - REDIS_ADDR=redis:6379
     depends_on:
