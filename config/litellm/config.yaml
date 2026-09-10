@@ -122,7 +122,28 @@ model_list:
   # instead, so leaving it unserved degrades cleanly. Backed by Ollama by
   # default rather than vLLM: the VL model is a secondary, low-volume model and
   # Ollama can swap it in and out without taking VRAM from the chat model.
-  - model_name: gpu/chat/vision
+  #
+  # THE NAME IS ENV-DRIVEN, and that is the whole point.
+  #
+  # LiteLLM publishes every alias in this file whether or not its api_base
+  # answers, so a box that merely sets ENABLE_OLLAMA=false still lists
+  # gpu/chat/vision in /v1/models — and every call then 500s with "Cannot
+  # connect to host ollama:11434". That is strictly WORSE than an absent
+  # alias: a consumer routes AROUND a missing optional role, but breaks on a
+  # published-but-dead one, having no way to tell "unserved" from "serving
+  # badly".
+  #
+  # Deleting the block is not an option either — the default profiles serve
+  # vision via Ollama and the Blackwell profile serves it via llama.cpp, so it
+  # must stay for them.
+  #
+  # So a box that cannot serve vision sets
+  #   CONTRACT_VISION_ALIAS=unserved/vision
+  # which publishes the deployment under a name outside the gpu/ contract
+  # namespace. Consumers looking for gpu/chat/vision do not find it and fall
+  # back cleanly, while the entry remains introspectable for debugging.
+  # Defaults to the real contract name, so every existing box is unaffected.
+  - model_name: os.environ/CONTRACT_VISION_ALIAS
     litellm_params:
       model: os.environ/CONTRACT_VISION_MODEL
       api_base: os.environ/CONTRACT_VISION_API_BASE

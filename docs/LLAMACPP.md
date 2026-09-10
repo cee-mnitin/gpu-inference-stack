@@ -207,14 +207,22 @@ around a missing optional role** (vision falls back to a cloud provider) but
 **breaks on a published-but-dead one** — it has no way to tell "unserved" from
 "serving badly".
 
-**Fix:** comment out that alias's block in `config/litellm/config.yaml` on the
-box that cannot serve it. It cannot be removed upstream, because the default
-profiles serve vision via Ollama and the Blackwell profile serves it via
-llama.cpp.
+**Fix:** rename the alias out of the `gpu/` contract namespace:
 
-`scripts/deploy.sh` warns whenever a contract role's `api_base` names a
-service whose `ENABLE_*` is false, so this is caught at deploy time — but the
-config edit is manual.
+```bash
+CONTRACT_VISION_ALIAS=unserved/vision
+```
+
+`config/litellm/config.yaml` declares the vision alias as
+`model_name: os.environ/CONTRACT_VISION_ALIAS`, defaulting to the real
+contract name. So consumers looking for `gpu/chat/vision` no longer find it
+and fall back cleanly, while the entry stays introspectable for debugging.
+The block cannot simply be deleted upstream — the default profiles serve
+vision via Ollama and the Blackwell profile serves it via llama.cpp.
+
+`scripts/deploy.sh` additionally warns whenever a contract role's `api_base`
+names a service whose `ENABLE_*` is false, so a half-configured box is caught
+at deploy time.
 
 ### 6. Image built for the wrong compute capability
 
