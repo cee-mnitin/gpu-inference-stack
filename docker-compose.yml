@@ -239,7 +239,25 @@ services:
       - llamacpp
     restart: unless-stopped
     ports:
-      - "${LLAMACPP_PORT:-8083}:8080"
+      # LOOPBACK BY DEFAULT, and that is a security decision.
+      #
+      # llama-server has no authentication here and sets CORS to '*' — it says
+      # so itself on every boot:
+      #   CORS is set to allow all origins ('*') and no API key is set
+      #   this can be a security risk (cross-origin attacks)
+      #
+      # Published on 0.0.0.0 it was reachable over both the LAN and Netbird
+      # (verified: HTTP 200 on 192.168.3.40:8083 and 100.117.227.40:8083),
+      # which hands anyone on those networks the model directly — bypassing
+      # LiteLLM's virtual keys, per-consumer spend tracking, rate limits and
+      # the gpu/<task>/<role> contract altogether.
+      #
+      # LiteLLM never needs this port: it reaches the server as
+      # http://llamacpp:8080 on the compose network. The host publish exists
+      # only for local debugging and for scripts/benchmark.sh --direct. So
+      # bind it to loopback and let a box opt into wider exposure explicitly.
+      # Same reasoning as LITELLM_BIND_ADDR, which this file already documents.
+      - "${LLAMACPP_BIND_ADDR:-127.0.0.1}:${LLAMACPP_PORT:-8083}:8080"
     volumes:
       # Read-only: the server has no reason to write to the weights directory.
       - ${LLAMACPP_MODELS_DIR:-./data/llamacpp/models}:/models:ro
