@@ -291,12 +291,17 @@ services:
       # that, because fit only touches unset args. FIT_CTX is the second line
       # of defence if someone ever unsets CTX_SIZE.
       #
-      # 131072 / 4 slots = 32768 per slot = the contract floor exactly.
+      # 163840 / 4 slots = 40960 per slot — deliberately ABOVE the 32768
+      # contract floor. The floor is on USABLE context, and prompt AND
+      # generation are charged to the same slot, so at exactly 32768 a real
+      # 32k prompt has no room to answer and is rejected outright:
+      #   request (33366 tokens) exceeds the available context size (32768)
+      # 40960 leaves 8192 tokens of generation headroom, for ~0.75 GiB more KV.
       # scripts/health-check.sh asserts the LIVE per-slot value, because
       # neither of the two settings below can catch later config drift.
-      - LLAMA_ARG_CTX_SIZE=${LLAMACPP_CTX_SIZE:-131072}
+      - LLAMA_ARG_CTX_SIZE=${LLAMACPP_CTX_SIZE:-163840}
       - LLAMA_ARG_N_PARALLEL=${LLAMACPP_PARALLEL:-4}
-      - LLAMA_ARG_FIT_CTX=${LLAMACPP_FIT_CTX:-131072}
+      - LLAMA_ARG_FIT_CTX=${LLAMACPP_FIT_CTX:-163840}
       #
       # DO NOT add LLAMA_ARG_KV_UNIFIED_PER_SLOT here. It reads like a floor
       # and is actually a CAP — the server logs
@@ -597,7 +602,22 @@ services:
       - CONTRACT_EMBED_API_BASE=${CONTRACT_EMBED_API_BASE:-http://infinity:7997}
       - CONTRACT_RERANK_API_BASE=${CONTRACT_RERANK_API_BASE:-http://infinity:7997}
       - CONTRACT_OCR_API_BASE=${CONTRACT_OCR_API_BASE:-http://vllm:8000/v1}
-    command: --config /app/config/config.yaml --port 4000 --detailed_debug
+    # LOG LEVEL IS A PRODUCTION SETTING, not a convenience.
+    #
+    # --detailed_debug was unconditional here. It logs full request bodies —
+    # measured 25,309 log lines with entire 30k-token prompts inline — which
+    # has two costs beyond noise:
+    #   1. Latency. TTFT through the gateway measured 917ms p50 against 290ms
+    #      straight to llama.cpp, with IDENTICAL per-token latency (9.4 vs
+    #      9.6ms). All ~600ms of that was request-setup overhead, and it lands
+    #      squarely on gpu/chat/fast, the role that exists for latency.
+    #   2. Data retention. With the logging limits below (100m x 5 files) this
+    #      can hold up to 500 MB of verbatim consumer prompts on disk, on a
+    #      box serving MULTIPLE consumers. A debug flag should not silently
+    #      become a data-retention decision.
+    #
+    # Set LITELLM_LOG_LEVEL=debug to get it back while diagnosing something.
+    command: --config /app/config/config.yaml --port 4000 ${LITELLM_DEBUG_FLAG:-}
     depends_on:
       redis:
         condition: service_healthy

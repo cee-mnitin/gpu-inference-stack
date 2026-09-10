@@ -109,14 +109,25 @@ def latency(concurrency, prompt_tokens, label):
     """Streamed TTFT + inter-token latency. Streaming is what a chat UI does,
     and TTFT is invisible to a non-streaming timer."""
     prompt = "word " * prompt_tokens + "\nWrite exactly three short sentences about rain."
+    errs = []
     def one(_):
+        # Record WHY a request failed. Swallowing the exception turns a real
+        # gateway fault into an unexplained "7/8" that looks like noise.
         try:
             out, total, ttft = post(
                 {"model": MODEL, "max_tokens": 96, "stream": True,
                  "messages": [{"role": "user", "content": prompt}]}, stream=True)
             n = out["n"] or 1
             return ttft, total, n, True
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read()[:200].decode("utf-8", "replace")
+            except Exception:
+                detail = ""
+            errs.append(f"HTTP {e.code}: {detail}")
+            return None, None, 0, False
         except Exception as e:
+            errs.append(f"{type(e).__name__}: {e}")
             return None, None, 0, False
     n_req = max(concurrency, concurrency * (1 if QUICK else 2))
     t0 = time.perf_counter()
@@ -136,8 +147,13 @@ def latency(concurrency, prompt_tokens, label):
         print(f"      TTFT     p50 {pct(ttfts,50)*1000:7.0f} ms   p95 {pct(ttfts,95)*1000:7.0f} ms")
     if tpots:
         print(f"      TPOT     p50 {pct(tpots,50):7.1f} ms   -> {1000/pct(tpots,50):5.1f} tok/s per stream")
+    if errs:
+        from collections import Counter
+        for msg, cnt in Counter(errs).most_common(3):
+            print(f"      {R}{cnt} failed{N}: {msg}")
     results[label] = {"agg_tok_s": toks/wall, "ttft_p50_ms": pct(ttfts,50)*1000 if ttfts else None,
-                      "tpot_p50_ms": pct(tpots,50) if tpots else None, "ok": len(ok), "sent": n_req}
+                      "tpot_p50_ms": pct(tpots,50) if tpots else None, "ok": len(ok), "sent": n_req,
+                      "errors": errs[:3]}
 
 print(f"{C}== 1. Latency / throughput ==={N}")
 print("   interactive+fast care about TTFT and per-stream TPOT; bulk cares about aggregate.")
