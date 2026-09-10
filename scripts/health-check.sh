@@ -14,6 +14,22 @@ if [ -f "$PROJECT_ROOT/.env" ]; then
     source "$PROJECT_ROOT/.env"
 fi
 
+# ---------------------------------------------------------------------------
+# Where is LiteLLM actually listening?
+#
+# `localhost` is WRONG on any box that pins LITELLM_BIND_ADDR — and pinning it
+# is mandatory wherever something else already holds :8080 (the A6000 box runs
+# a reverse proxy on 127.0.0.1:8080). Probing localhost there does not merely
+# fail, it probes THAT service and reports its answer: an HTTP 404 from an
+# unrelated proxy, indistinguishable from a broken LiteLLM.
+#
+# 0.0.0.0 means "all interfaces", so loopback is correct in that case.
+_litellm_host="${LITELLM_BIND_ADDR:-localhost}"
+case "$_litellm_host" in
+    ""|0.0.0.0|"[::]"|"::") _litellm_host="localhost" ;;
+esac
+LITELLM_BASE="http://${_litellm_host}:${LITELLM_PORT:-8080}"
+
 echo "GPU Inference Stack - Health Check"
 echo "==================================="
 echo ""
@@ -43,7 +59,10 @@ check_endpoint() {
 }
 
 # Check LiteLLM
-check_endpoint "LiteLLM" "http://localhost:${LITELLM_PORT:-8080}/health"
+# /health/liveliness, not /health: /health is the ADMIN endpoint — it requires
+# a key and fires a real request at every configured backend on every probe.
+# The compose healthcheck for this service carries the same note.
+check_endpoint "LiteLLM" "${LITELLM_BASE}/health/liveliness"
 
 # Check Prometheus
 check_endpoint "Prometheus" "http://localhost:${PROMETHEUS_PORT:-9090}/-/healthy"
@@ -188,7 +207,7 @@ fi
 echo ""
 echo "Ember contract aliases (what consumers address):"
 _served=$(curl -s -m 10 -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
-    "http://localhost:${LITELLM_PORT:-8080}/v1/models" 2>/dev/null \
+    "${LITELLM_BASE}/v1/models" 2>/dev/null \
     | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
 
 if [ -z "$_served" ]; then
@@ -233,7 +252,7 @@ fi
 if [ "${CONTRACT_PROBE:-1}" = "1" ] && [ -n "$_served" ]; then
     echo ""
     echo "Contract call probe (one real request per alias):"
-    _base="http://localhost:${LITELLM_PORT:-8080}"
+    _base="$LITELLM_BASE"
     _auth="Authorization: Bearer ${LITELLM_MASTER_KEY}"
 
     # Reports one line per alias. $1 alias, $2 endpoint path, $3 JSON body.
