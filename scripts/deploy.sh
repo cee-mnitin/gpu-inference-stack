@@ -97,6 +97,20 @@ fi
 echo -e "${GREEN}✓ Docker is available${NC}"
 echo ""
 
+# Refuse to deploy a stack whose config reads variables the container is never
+# given. The role guard further down checks the CONTRACT_* variables are SET;
+# this checks they are FORWARDED, which is a different failure and the one that
+# shipped broken on 2026-09-10 — twelve variables read by config.yaml, none
+# passed by docker-compose.yml, all six aliases published and every request to
+# them failing. See docs/superpowers/specs/2026-09-10-portable-across-servers-and-models.md
+if [ -x "$SCRIPT_DIR/check-contract-wiring.sh" ]; then
+    if ! "$SCRIPT_DIR/check-contract-wiring.sh"; then
+        echo -e "${RED}Refusing to deploy: the contract would be published but unwired.${NC}"
+        exit 1
+    fi
+    echo ""
+fi
+
 # Create data directories
 echo "Creating data directories..."
 mkdir -p "$PROJECT_ROOT/data"/{ollama/models,vllm/cache,llamacpp/models,huggingface,prometheus,grafana,postgres}

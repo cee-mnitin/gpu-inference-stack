@@ -56,7 +56,10 @@ services:
   # Enhanced to match/replace existing vllm-qwen36 container with all features
   # ============================================================================
   vllm:
-    image: vllm/vllm-openai:v0.23.0  # Same version as existing for compatibility
+    # Which vLLM build a box needs is a property of its GPU, so it belongs in
+    # the server profile. v0.23.0 predates Blackwell (sm_120) and does NOT
+    # degrade gracefully — the five ddai* boxes must set v0.25.1 or newer.
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.23.0}
     container_name: vllm-new
     profiles:
       - vllm
@@ -70,31 +73,59 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
+      # Consumed by the shell-form command below, not by vLLM itself. They are
+      # passed as ENV rather than interpolated into the command string so the
+      # `${VAR:+…}` conditionals are evaluated by the container's shell, which
+      # is the only place that can decide to emit no argument at all.
+      - VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B-FP8}
+      - VLLM_MODEL_NAME=${VLLM_MODEL_NAME:-qwen3.6}
+      - VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION:-0.65}
+      - VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-16384}
+      - VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-62}
+      - VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE:-1}
+      # Every flag below is OMITTED when its variable is empty. Defaults
+      # reproduce the previous hardcoded tail exactly, so no existing profile
+      # changes meaning.
+      - VLLM_PREFIX_CACHING=${VLLM_PREFIX_CACHING-1}
+      - VLLM_CHUNKED_PREFILL=${VLLM_CHUNKED_PREFILL-1}
+      # MoE-ONLY. Set empty for a dense model.
+      - VLLM_EXPERT_PARALLEL=${VLLM_EXPERT_PARALLEL-1}
+      # Per-family. Empty means this box serves no tool-calling, and
+      # --enable-auto-tool-choice is then suppressed with it (see the command).
+      - VLLM_TOOL_CALL_PARSER=${VLLM_TOOL_CALL_PARSER-qwen3_xml}
+      # Set EMPTY for a NON-thinking model. Left at qwen3, an Instruct model
+      # returns content:null with the whole answer in reasoning_content,
+      # because no closing </think> ever arrives — measured 5/5 on ddai3.
+      - VLLM_REASONING_PARSER=${VLLM_REASONING_PARSER-qwen3}
+      - VLLM_EXTRA_ARGS=${VLLM_EXTRA_ARGS-}
+    # SHELL FORM, deliberately. A YAML-list command cannot express "omit this
+    # flag": a variable expanding to "" still produces an empty argv entry, and
+    # vLLM rejects it. So there was no value of any variable that let this file
+    # serve a dense or a non-thinking model. `${VAR:+…}` in the container's
+    # shell emits nothing at all when VAR is empty, which is the whole point.
+    #
+    # $$ escapes the $ so compose passes it through for the shell to expand.
+    # The image's own entrypoint is ["vllm","serve"]; this replaces it with a
+    # shell and execs the same CLI, so the interface is unchanged.
+    #
+    # Model is positional: `vllm serve --model X` is deprecated and warns.
+    entrypoint: ["/bin/sh", "-lc"]
     command:
-      - --model
-      - ${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B-FP8}
-      - --served-model-name
-      - ${VLLM_MODEL_NAME:-qwen3.6}
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-      - --gpu-memory-utilization
-      - ${VLLM_GPU_MEMORY_UTILIZATION:-0.65}
-      - --max-model-len
-      - ${VLLM_MAX_MODEL_LEN:-16384}
-      - --max-num-seqs
-      - ${VLLM_MAX_NUM_SEQS:-62}
-      - --tensor-parallel-size
-      - ${VLLM_TENSOR_PARALLEL_SIZE:-1}
-      - --enable-prefix-caching
-      - --enable-chunked-prefill
-      - --enable-expert-parallel
-      - --enable-auto-tool-choice
-      - --tool-call-parser
-      - qwen3_xml
-      - --reasoning-parser
-      - qwen3
+      - >-
+        exec vllm serve "$${VLLM_MODEL}"
+        --served-model-name "$${VLLM_MODEL_NAME}"
+        --host 0.0.0.0
+        --port 8000
+        --gpu-memory-utilization "$${VLLM_GPU_MEMORY_UTILIZATION}"
+        --max-model-len "$${VLLM_MAX_MODEL_LEN}"
+        --max-num-seqs "$${VLLM_MAX_NUM_SEQS}"
+        --tensor-parallel-size "$${VLLM_TENSOR_PARALLEL_SIZE}"
+        $${VLLM_PREFIX_CACHING:+--enable-prefix-caching}
+        $${VLLM_CHUNKED_PREFILL:+--enable-chunked-prefill}
+        $${VLLM_EXPERT_PARALLEL:+--enable-expert-parallel}
+        $${VLLM_TOOL_CALL_PARSER:+--enable-auto-tool-choice --tool-call-parser "$${VLLM_TOOL_CALL_PARSER}"}
+        $${VLLM_REASONING_PARSER:+--reasoning-parser "$${VLLM_REASONING_PARSER}"}
+        $${VLLM_EXTRA_ARGS}
     deploy:
       resources:
         reservations:
@@ -192,6 +223,66 @@ services:
         max-file: "${MAX_LOG_FILES:-5}"
 
   # ============================================================================
+  # INFINITY  —  embeddings + reranking (the contract's embed/rerank roles)
+  # ============================================================================
+  # Serves BAAI/bge-m3 AND BAAI/bge-reranker-v2-m3 from ONE container, which is
+  # what config/litellm/config.yaml expects (both aliases carry the
+  # `infinity/` provider prefix and point at the same port).
+  #
+  # BOTH --model-id flags are mandatory. An embed-only Infinity returns 400 on
+  # /rerank, and a failing reranker does not surface as an error — a consumer's
+  # retrieval silently degrades to un-reranked order.
+  #
+  # Why this exists alongside `embeddings` (TEI): TEI publishes no Blackwell
+  # (sm_120) build — ghcr has turing / 89 / hopper / latest and nothing else —
+  # and crash-loops there with "Runtime compute cap 120 is not compatible with
+  # compile time compute cap 80". Infinity's torch engine runs on sm_120, and
+  # measured 346-3475 embeddings/sec at batch 32 on an RTX PRO 4500. The two
+  # services are ALTERNATIVES: CONTRACT_EMBED_API_BASE decides which is used.
+  infinity:
+    image: ${INFINITY_IMAGE:-michaelf34/infinity:0.0.77}
+    container_name: infinity
+    profiles:
+      - infinity
+    restart: unless-stopped
+    ports:
+      - "${INFINITY_PORT:-7997}:7997"
+    volumes:
+      - ${HF_HOME:-./data/huggingface}:/app/.cache
+    environment:
+      - HF_HOME=/app/.cache
+      - INFINITY_QUEUE_SIZE=${INFINITY_QUEUE_SIZE:-512}
+    # QUOTED in .env and it must stay quoted: deploy.sh and health-check.sh
+    # both `source` that file, and an unquoted multi-word value makes the shell
+    # run its second word as a command.
+    command: ${INFINITY_CMD:-v2 --model-id BAAI/bge-m3 --model-id BAAI/bge-reranker-v2-m3 --port 7997}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${GPU_DEVICES:-0}']
+              capabilities: [gpu]
+    networks:
+      - gpu-inference-net
+    healthcheck:
+      # python3, not curl — this image has no curl, and a healthcheck that can
+      # never pass is worse than none: it cannot report a backend that has
+      # genuinely died, and it makes depends_on: service_healthy unusable.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7997/health',timeout=3).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # Two models load sequentially from cold; the second only starts after the
+      # first has warmed up.
+      start_period: 600s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "${MAX_LOG_SIZE:-100m}"
+        max-file: "${MAX_LOG_FILES:-5}"
+
+  # ============================================================================
   # REDIS - Caching Layer for LiteLLM
   # ============================================================================
   redis:
@@ -229,7 +320,9 @@ services:
     container_name: litellm
     restart: unless-stopped
     ports:
-      - "${LITELLM_PORT:-8080}:4000"
+      # Pin LITELLM_BIND_ADDR to the Netbird/LAN interface on a box whose
+      # consumers live elsewhere; leave 0.0.0.0 for a single-host install.
+      - "${LITELLM_BIND_ADDR:-0.0.0.0}:${LITELLM_PORT:-8080}:4000"
     volumes:
       - ./config/litellm:/app/config
     environment:
@@ -240,6 +333,43 @@ services:
       - REQUEST_TIMEOUT=${LITELLM_REQUEST_TIMEOUT:-600}
       - REDIS_HOST=${LITELLM_REDIS_HOST:-redis}
       - REDIS_PORT=${LITELLM_REDIS_PORT:-6379}
+      # ── EMBER CONTRACT — which model on this box fills each gpu/<task>/<role>
+      # config/litellm/config.yaml reads all twelve of these as
+      # `os.environ/CONTRACT_*`. They MUST be forwarded here: without them
+      # LiteLLM still publishes all six contract aliases in /v1/models and every
+      # request to them fails, which from a consumer's side is
+      # indistinguishable from a healthy stack with a broken model.
+      #
+      # scripts/deploy.sh's role guard cannot catch that — it verifies the
+      # variables are set in the shell, and has no way to know the container
+      # never received them. scripts/check-contract-wiring.sh is what closes
+      # that gap; it diffs the os.environ/ names in config.yaml against the
+      # names actually passed here, and deploy.sh runs it first.
+      #
+      # Defaults describe THIS box's local topology, so a profile that sets only
+      # VLLM_MODEL / VLLM_MODEL_NAME gets a working contract with no further
+      # edits. A box serving a role from another machine, or from a second
+      # engine, overrides just that role's pair.
+      - CONTRACT_INTERACTIVE_MODEL=${CONTRACT_INTERACTIVE_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
+      - CONTRACT_INTERACTIVE_API_BASE=${CONTRACT_INTERACTIVE_API_BASE:-http://vllm:8000/v1}
+      - CONTRACT_BULK_MODEL=${CONTRACT_BULK_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
+      - CONTRACT_BULK_API_BASE=${CONTRACT_BULK_API_BASE:-http://vllm:8000/v1}
+      - CONTRACT_FAST_MODEL=${CONTRACT_FAST_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
+      - CONTRACT_FAST_API_BASE=${CONTRACT_FAST_API_BASE:-http://vllm:8000/v1}
+      # A box that cannot serve vision sets CONTRACT_VISION_ALIAS to a name
+      # outside the gpu/ namespace (conventionally unserved/vision): consumers
+      # looking for gpu/chat/vision do not find it and fall back cleanly, while
+      # the deployment stays introspectable. Defaults to the contract name so
+      # every box that CAN serve vision is unaffected.
+      - CONTRACT_VISION_ALIAS=${CONTRACT_VISION_ALIAS:-gpu/chat/vision}
+      - CONTRACT_VISION_MODEL=${CONTRACT_VISION_MODEL:-ollama/${OLLAMA_VISION_MODEL:-gemma3:12b}}
+      - CONTRACT_VISION_API_BASE=${CONTRACT_VISION_API_BASE:-http://ollama:11434}
+      # Infinity serves bge-m3 AND bge-reranker-v2-m3 from one container, which
+      # is why both point at the same port. On a card where TEI works, point
+      # these at the `embeddings` service instead.
+      - CONTRACT_EMBED_API_BASE=${CONTRACT_EMBED_API_BASE:-http://infinity:7997}
+      - CONTRACT_RERANK_API_BASE=${CONTRACT_RERANK_API_BASE:-http://infinity:7997}
+      - CONTRACT_OCR_API_BASE=${CONTRACT_OCR_API_BASE:-http://vllm:8000/v1}
     command: --config /app/config/config.yaml --port 4000 --detailed_debug
     depends_on:
       redis:
