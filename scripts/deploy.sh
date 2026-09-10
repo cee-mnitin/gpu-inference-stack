@@ -252,9 +252,17 @@ docker compose -f "$PROJECT_ROOT/docker-compose.yml" ps
 echo ""
 echo -e "${GREEN}Deployment complete!${NC}"
 echo ""
+# Print the address LiteLLM is ACTUALLY on. `localhost` is wrong wherever
+# LITELLM_BIND_ADDR is pinned — and on a box where something else holds :8080
+# (which is why it gets pinned) the printed URL points at that other service.
+# Handing someone a URL that resolves to a different app is worse than
+# printing nothing. 0.0.0.0 and [::] do include loopback, so those stay.
+_addr="${LITELLM_BIND_ADDR:-localhost}"
+case "$_addr" in ""|0.0.0.0|"[::]"|"::") _addr="localhost" ;; esac
+
 echo "Access points:"
-echo "  LiteLLM API: http://localhost:${LITELLM_PORT:-8080}/v1"
-echo "  LiteLLM UI:  http://localhost:${LITELLM_PORT:-8080}/ui"
+echo "  LiteLLM API: http://${_addr}:${LITELLM_PORT:-8080}/v1"
+echo "  LiteLLM UI:  http://${_addr}:${LITELLM_PORT:-8080}/ui"
 echo "  Grafana:     http://localhost:${GRAFANA_PORT:-3000} (admin/***)"
 echo "  Prometheus:  http://localhost:${PROMETHEUS_PORT:-9090}"
 
@@ -267,7 +275,9 @@ if [ "${ENABLE_VLLM}" = "true" ]; then
 fi
 
 if [ "${ENABLE_LLAMACPP}" = "true" ]; then
-    echo "  llama.cpp:   http://localhost:${LLAMACPP_PORT:-8083}"
+    # Loopback by default and deliberately — llama-server has no auth. This is
+    # for local debugging and scripts/benchmark.sh --direct, not for consumers.
+    echo "  llama.cpp:   http://${LLAMACPP_BIND_ADDR:-127.0.0.1}:${LLAMACPP_PORT:-8083}  (no auth — local only)"
 fi
 
 echo ""
