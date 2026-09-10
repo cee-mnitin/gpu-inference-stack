@@ -292,17 +292,30 @@ services:
       - LLAMA_ARG_LOAD_MODE=${LLAMACPP_LOAD_MODE:-mmap}
       #
       # ── Fit: ON, deliberately ────────────────────────────────────────────
-      # N_CPU_MOE and N_GPU_LAYERS are intentionally UNSET — an empty string
-      # reads as unset to llama-server's env parsing, so "let fit decide"
-      # needs no conditional logic in compose. `fit on` then measures free
-      # VRAM at boot and offloads only the experts that do not fit, so the
-      # service adapts when Infinity's footprint moves. A hardcoded -ncmoe
-      # tuned once goes stale and fails closed (OOM) rather than degrading.
-      # Pin both for bit-reproducible startup.
+      # N_CPU_MOE and N_GPU_LAYERS are intentionally left UNSET so that
+      # `fit on` measures free VRAM at boot and offloads only the experts
+      # that do not fit. The service then adapts when Infinity's footprint
+      # moves, whereas a hardcoded -ncmoe tuned once goes stale and fails
+      # CLOSED (OOM) rather than degrading. Set either to pin startup.
+      #
+      # NOTE THE ODD SYNTAX BELOW, and do not "simplify" it to `=${VAR:-}`.
+      # An empty LLAMA_ARG_* value is NOT treated as unset — llama-server
+      # parses it and dies:
+      #   error while handling environment variable
+      #   "LLAMA_ARG_N_CPU_MOE": invalid value
+      # and because `restart: unless-stopped` is set, that becomes a crash
+      # loop rather than a visible one-shot failure. Verified against
+      # b10884: every numeric and enum LLAMA_ARG_* rejects empty; only
+      # MMPROJ and ALIAS tolerate it.
+      #
+      # `VAR${X:+=${X}}` renders as the BARE name `VAR` when X is empty,
+      # which is compose's pass-through form — and since the name is not in
+      # the host environment, the variable is omitted from the container
+      # entirely. When X is set it renders as `VAR=value` as normal.
       - LLAMA_ARG_FIT=${LLAMACPP_FIT:-on}
       - LLAMA_ARG_FIT_TARGET=${LLAMACPP_FIT_TARGET:-2048}
-      - LLAMA_ARG_N_CPU_MOE=${LLAMACPP_NCMOE:-}
-      - LLAMA_ARG_N_GPU_LAYERS=${LLAMACPP_NGL:-}
+      - LLAMA_ARG_N_CPU_MOE${LLAMACPP_NCMOE:+=${LLAMACPP_NCMOE}}
+      - LLAMA_ARG_N_GPU_LAYERS${LLAMACPP_NGL:+=${LLAMACPP_NGL}}
       #
       # ── Attention / KV ───────────────────────────────────────────────────
       # f16 KV, not q8_0: PR #27742 reports -ctk/-ctv q8_0 assertion failures
@@ -329,12 +342,14 @@ services:
       - LLAMA_ARG_REASONING=${LLAMACPP_REASONING:-auto}
       - LLAMA_ARG_ENDPOINT_METRICS=1
       #
-      # ── Per-model extras (both empty on the A6000) ───────────────────────
+      # ── Per-model extras (both unset on the A6000) ───────────────────────
       # OVERRIDE_TENSOR places Flash-Next's 51B PLE table in host memory
       # rather than on the GPU or streamed from disk; MMPROJ adds its vision
-      # tower. Qwen3-Next-80B-A3B needs neither.
-      - LLAMA_ARG_OVERRIDE_TENSOR=${LLAMACPP_OVERRIDE_TENSOR:-}
-      - LLAMA_ARG_MMPROJ=${LLAMACPP_MMPROJ:-}
+      # tower. Qwen3-Next-80B-A3B needs neither, so both are omitted here
+      # via the same pass-through form documented above — OVERRIDE_TENSOR in
+      # particular rejects an empty value outright.
+      - LLAMA_ARG_OVERRIDE_TENSOR${LLAMACPP_OVERRIDE_TENSOR:+=${LLAMACPP_OVERRIDE_TENSOR}}
+      - LLAMA_ARG_MMPROJ${LLAMACPP_MMPROJ:+=${LLAMACPP_MMPROJ}}
     deploy:
       resources:
         reservations:

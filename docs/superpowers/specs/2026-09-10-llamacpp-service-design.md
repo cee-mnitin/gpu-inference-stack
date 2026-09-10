@@ -199,9 +199,29 @@ variable in `.env` rather than editing an argument string:
 | `MMPROJ` | `${LLAMACPP_MMPROJ:-}` | Blackwell vision only |
 | `REASONING` | `${LLAMACPP_REASONING:-auto}` | emits `reasoning_content`, not raw `<think>` |
 
-Empty-string variables are the reason this works cleanly: `LLAMA_ARG_N_CPU_MOE=`
-is treated as unset by `llama-server`'s env parsing, so "let `fit` decide" needs
-no conditional logic in compose.
+**Correction (verified on b10884): an empty `LLAMA_ARG_*` value is NOT treated
+as unset.** `llama-server` parses it and exits:
+
+```
+error while handling environment variable "LLAMA_ARG_N_CPU_MOE": invalid value
+```
+
+With `restart: unless-stopped` that becomes a crash loop rather than a visible
+one-shot failure. Tested across 15 variables: every numeric and enum one
+rejects empty; only `MMPROJ` and `ALIAS` tolerate it.
+
+So the four variables that default to empty use compose's pass-through form
+instead, which omits the variable entirely:
+
+```yaml
+- LLAMA_ARG_N_CPU_MOE${LLAMACPP_NCMOE:+=${LLAMACPP_NCMOE}}
+```
+
+When `LLAMACPP_NCMOE` is empty this renders as the bare name
+`LLAMA_ARG_N_CPU_MOE`, which compose resolves from the host environment — and
+since it is not there, the variable never reaches the container. When set it
+renders as `LLAMA_ARG_N_CPU_MOE=6` as normal. Verified both ways: one
+`LLAMA_ARG_*` in the container env when empty, three when set.
 
 Leaving `N_CPU_MOE` and `N_GPU_LAYERS` unset by default is a deliberate
 production choice. `fit on` measures free VRAM at boot, so the service adapts
