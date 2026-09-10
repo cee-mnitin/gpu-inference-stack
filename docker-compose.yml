@@ -278,8 +278,18 @@ services:
       # neither of the two settings below can catch later config drift.
       - LLAMA_ARG_CTX_SIZE=${LLAMACPP_CTX_SIZE:-131072}
       - LLAMA_ARG_N_PARALLEL=${LLAMACPP_PARALLEL:-4}
-      - LLAMA_ARG_KV_UNIFIED_PER_SLOT=${LLAMACPP_CTX_PER_SLOT:-32768}
       - LLAMA_ARG_FIT_CTX=${LLAMACPP_FIT_CTX:-131072}
+      #
+      # DO NOT add LLAMA_ARG_KV_UNIFIED_PER_SLOT here. It reads like a floor
+      # and is actually a CAP — the server logs
+      #   srv load_model: capping per-slot context (131072) to
+      #   --kv-unified-per-slot (32768)
+      # so setting it to the contract minimum can only ever REDUCE context,
+      # never protect it. On a 1-slot/128k profile it silently cut per-slot
+      # context 4x, destroying exactly the long-context capability that
+      # deployment exists for — and an assertion checking ">= 32768" passes.
+      # CTX_SIZE and N_PARALLEL already determine per-slot context exactly.
+      # LLAMACPP_CTX_PER_SLOT survives only as health-check.sh's floor.
       #
       # ── Residency ────────────────────────────────────────────────────────
       # LAZY_MODE=off is MANDATORY on the A6000. Its default is `auto`, which

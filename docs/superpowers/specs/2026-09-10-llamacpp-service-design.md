@@ -113,10 +113,26 @@ with a compose-native default.
    prefill" symptom on the 51B PLE table; worth testing on a current build
    before assuming the b10644 pin is permanent.
 
-3. **`--kv-unified-per-slot N`** sizes the shared KV pool as `n_parallel * N`
-   when `-c` is not given. It states the contract floor directly. This design
-   still sets `--ctx-size` explicitly (per item 1) and treats
-   `KV_UNIFIED_PER_SLOT` as the belt-and-braces expression of intent.
+3. **`--kv-unified-per-slot N` is a CAP, not a floor** — the opposite of what
+   its name suggests and of what this design initially assumed. Verified on
+   b10884, the server logs:
+
+   ```
+   srv load_model: capping per-slot context (131072) to --kv-unified-per-slot (32768)
+   ```
+
+   Set to the contract *minimum* it can only ever REDUCE context. On the
+   Blackwell profile (1 slot, 131072) it silently produced 32768 — a 4x loss
+   of exactly the long-context capability that deployment exists for — and an
+   assertion checking `>= 32768` passes it.
+
+   So it is **not wired into the service at all**. `--ctx-size` and
+   `--parallel` already determine per-slot context exactly, and
+   `LLAMACPP_CTX_PER_SLOT` survives only as `health-check.sh`'s floor value.
+
+   Separately and benignly, llama.cpp also caps slot context to the model's
+   *training* context. Both models here natively support 262144, so this only
+   matters if the service is pointed at a short-context model.
 
 ### 2.8 Healthcheck binaries: verified, not assumed
 

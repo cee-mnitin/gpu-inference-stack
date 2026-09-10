@@ -129,6 +129,22 @@ except Exception:
                 echo "  short. Only real long prompts fail, which is why this check exists."
             else
                 echo -e "${GREEN}✓ $_perslot >= $_lcfloor${NC}"
+                # A floor check alone is not enough: something can silently
+                # REDUCE per-slot context and still clear 32768. Two known
+                # culprits — -fit shrinking an unset --ctx-size, and
+                # --kv-unified-per-slot acting as a cap rather than a floor.
+                # A 1-slot/128k deployment capped to 32k passes the floor
+                # while losing 4x the context it exists to provide. So also
+                # check the live value against the configured ratio.
+                if [ -n "${LLAMACPP_CTX_SIZE:-}" ] && [ -n "${LLAMACPP_PARALLEL:-}" ]; then
+                    _expect=$(( LLAMACPP_CTX_SIZE / LLAMACPP_PARALLEL ))
+                    if [ "$_perslot" -ne "$_expect" ]; then
+                        echo -e "  ${YELLOW}but expected $_expect${NC} (LLAMACPP_CTX_SIZE/LLAMACPP_PARALLEL)"
+                        echo "  Something reduced the live context below what .env asks for."
+                        echo "  Check the server log for 'capping per-slot context' or a fit"
+                        echo "  adjustment:  docker logs llamacpp 2>&1 | grep -iE 'cap|fit|n_ctx'"
+                    fi
+                fi
             fi
             ;;
     esac

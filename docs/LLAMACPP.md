@@ -145,10 +145,29 @@ There is a second route in: `-fit` defaults to `on` and adjusts *unset*
 arguments, with `--fit-ctx` (default **4096**) as the floor it may shrink
 context to. A box that leaves `--ctx-size` unset can come up serving 4k.
 
+And a third: **`--kv-unified-per-slot` is a CAP, not a floor.** Setting it to
+the contract minimum can only ever reduce context. The server says so:
+
+```
+srv load_model: capping per-slot context (131072) to --kv-unified-per-slot (32768)
+```
+
+On a 1-slot/128k deployment that silently cuts context 4x — while a "≥32768"
+assertion still passes. It is deliberately **not** wired into the service for
+this reason; `LLAMACPP_CTX_PER_SLOT` is only `health-check.sh`'s floor value.
+
+A fourth, benign one: llama.cpp also caps slot context to the **model's
+training context**, logging `exceeds the training context of the model`. Both
+models here support far more than 32k natively (Qwen3-Next 262144,
+Flash-Next 262144 extensible to 1M), so this only bites if you point the
+service at a short-context model.
+
 **Fix:** keep `LLAMACPP_CTX_SIZE` set explicitly (fit only touches unset
-args), and keep it at `LLAMACPP_PARALLEL × 32768`. `health-check.sh` asserts
-the **live** per-slot value from `/props`, which is the only one of these
-guards that catches config drift on a running system.
+args), keep it at `LLAMACPP_PARALLEL × 32768`, and do not add
+`--kv-unified-per-slot`. `health-check.sh` asserts the **live** per-slot value
+from `/props` against both the floor *and* the configured
+`CTX_SIZE / PARALLEL` ratio — the ratio check is what catches a silent
+reduction that still clears the floor.
 
 ### 2. `LAZY_MODE=auto` on a box without NVMe
 
