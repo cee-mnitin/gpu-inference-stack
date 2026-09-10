@@ -53,6 +53,28 @@ This directory contains preconfigured server profiles for different GPU configur
 
 **Use when**: You have multiple GPUs and want to run large models
 
+### 4. A6000 48GB Profile (`server-a6000-48gb.env`)
+
+- **Hardware**: RTX A6000, `sm_86` (Ampere), 48 GB VRAM, 251 GB RAM
+- **Storage**: rotational SAS, **no NVMe** — hence `LLAMACPP_LAZY_MODE=off`
+- **Engine**: llama.cpp (vLLM cannot use FP8/NVFP4 natively on `sm_86`)
+- **Model**: Qwen3-Next-80B-A3B `UD-Q3_K_XL`, 33.19 GiB, 4 slots x 32k
+- **Contract**: fills `interactive` + `bulk` + `fast`; `vision` unserved
+- **Note**: sets `LITELLM_BIND_ADDR` — required, port 8080 is occupied there
+
+### 5. Blackwell 97GB Profile (`server-blackwell-97gb.env`)
+
+- **Hardware**: RTX PRO 6000 Blackwell Max-Q, `sm_120`, 97 GB VRAM
+- **Engine**: llama.cpp, image pinned to `b10644` (llama.cpp#28355)
+- **Model**: Qwen3.8-Flash-Next `UD-IQ3_XXS`, 76.3 GiB, 1 slot x 128k
+- **Contract**: fills `interactive` + `vision`; `bulk`/`fast` point at the A6000
+- **Verify first**: confirm the image carries `sm_120` kernels, or every
+  request dies with "no kernel image is available for execution on the device"
+
+**Both of these ship with both engines disabled.** Enable exactly one —
+`deploy.sh` exits non-zero if `ENABLE_VLLM` and `ENABLE_LLAMACPP` are both
+true. See [../docs/LLAMACPP.md](../docs/LLAMACPP.md).
+
 ## How to Use
 
 ### Quick Start
@@ -104,16 +126,20 @@ ln -s servers/prod-gpu-01.env .env
 
 ## Profile Comparison
 
-| Feature | Default | High VRAM | Multi-GPU |
-|---------|---------|-----------|-----------|
-| VRAM Required | 8-24GB | 48GB+ | 96GB+ total |
-| Ollama Models | 1 small | 3-4 mixed | 4+ mixed |
-| vLLM Model Size | 7B | 35B | 35B+ |
-| GPU Memory % | 50% | 65% | 70% |
-| Embeddings | No | Yes | Yes |
-| Parallel Requests | 2 | 4 | 4 |
-| Tensor Parallel | No | No | Yes |
-| Prefix Caching | No | Yes | Yes |
+| Feature | Default | High VRAM | Multi-GPU | A6000 48GB | Blackwell 97GB |
+|---------|---------|-----------|-----------|------------|----------------|
+| VRAM Required | 8-24GB | 48GB+ | 96GB+ total | 48GB | 97GB |
+| Chat engine | vLLM | vLLM | vLLM | llama.cpp | llama.cpp |
+| Ollama Models | 1 small | 3-4 mixed | 4+ mixed | none | none |
+| Chat model size | 7B | 35B | 35B+ | 80B-A3B | 125B-A6B |
+| GPU Memory % | 50% | 65% | 70% | fit-managed | fit-managed |
+| Embeddings | No | Yes | Yes | Yes (Infinity) | Yes (Infinity) |
+| Parallel Requests | 2 | 4 | 4 | 4 | 1 |
+| Context per slot | 8k | 16k | 32k | 32k | 128k |
+| Tensor Parallel | No | No | Yes | No | No |
+| Prefix Caching | No | Yes | Yes | Yes (cache-reuse) | Yes (cache-reuse) |
+| Contract chat roles | all 3 | all 3 | all 3 | all 3 | interactive only |
+| `gpu/chat/vision` | Ollama | Ollama | Ollama | unserved | the model itself |
 
 ## Key Variables Explained
 
