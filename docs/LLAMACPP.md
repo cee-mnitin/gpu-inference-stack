@@ -338,9 +338,22 @@ print(json.load(urllib.request.urlopen(r,timeout=600))['choices'][0]['message'])
 Recorded on first deployment. Update when the quant, slot count, or co-tenants
 change.
 
+A6000 48GB, `UD-Q3_K_XL`, llama.cpp b10884, 2026-09-10. Full detail and
+methodology in [BENCHMARKS.md](BENCHMARKS.md).
+
 | | value | notes |
 |---|---|---|
-| `fit` decision | _pending first run_ | `docker logs llamacpp \| grep -i fit` |
-| decode (single stream) | _pending first run_ | tokens/sec |
-| prefill | _pending first run_ | tokens/sec |
-| VRAM in use | _pending first run_ | `nvidia-smi` with Infinity co-resident |
+| `fit` decision | **`ncmoe 0`** — fully GPU-resident | inferred from VRAM: 36.79 GiB in use vs 33.19 GiB of weights. Offload would sit *below* the weight size. The log does not report placement at default verbosity. |
+| VRAM in use | **42841 MiB** of 49140 | llamacpp 36.8 GiB + Infinity 3.7 GiB; 5835 MiB free |
+| KV + buffers | 3.60 GiB at 163840 pool | leaner than the 5.5 GiB budgeted |
+| prefill | **2180 t/s** (`pp4096`) | 2103 t/s at `pp512`; does not degrade with depth |
+| decode | **123 t/s** raw (`tg128`) | 104 t/s through HTTP at concurrency 1 |
+| aggregate | **123 t/s** at concurrency 4 | 143 t/s at concurrency 8, but TTFT 4x worse |
+| load time | 12–45 s | page-cache warm; a cold read off the SAS array is slower |
+| per-slot context | 40960 | above the 32768 floor, see below |
+| tool calling / JSON | **100%** across 6 cases | at Q3, which is why the quant stands |
+
+**Load time was not the problem predicted.** 45 s on first load and 12 s
+after, because the download had just populated the page cache — 251 GB of RAM
+means the 33 GiB file simply stays there. The `start_period: 900s` remains
+correct for a genuinely cold read, but is far from binding in practice.
