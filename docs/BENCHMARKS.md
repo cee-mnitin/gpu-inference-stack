@@ -73,17 +73,33 @@ benchmarks a different configuration than you are serving.
 
 ## Layer 2: serving under load
 
-Either tool speaks the OpenAI API, so point it at the LiteLLM base with a
-virtual key. `guidellm` is the lighter install; `vllm bench serve` is the more
-widely quoted:
+`guidellm` 0.7.3's CLI is `guidellm run` with `kind=`-style arguments — not
+the `guidellm benchmark --target ...` form that older docs show. It also needs
+a real HF tokenizer to synthesise prompts, and defaults to the *served* model
+name, which is not a repo id — so `--tokenizer` is mandatory here:
 
 ```bash
-guidellm benchmark --target http://<host>:8080/v1 \
-  --model gpu/chat/bulk --rate-type sweep --max-seconds 120
+docker build -t local/guidellm:0.7.3 - <<'DF'
+FROM python:3.12-slim
+RUN pip install --no-cache-dir guidellm==0.7.3
+ENTRYPOINT ["guidellm"]
+DF
+
+docker run --rm --network host -v "$PWD/data/huggingface:/hf" -e HF_HOME=/hf \
+  local/guidellm:0.7.3 run \
+  --backend kind=openai_http,target=http://localhost:8083,model=qwen3-next-80b \
+  --profile kind=concurrent,streams=4 \
+  --data kind=synthetic_text,prompt_tokens=256,output_tokens=128 \
+  --constraint kind=max_requests,count=16 \
+  --tokenizer kind=hf_auto,model=Qwen/Qwen3-Next-80B-A3B-Instruct \
+  --disable-console-interactive
 ```
 
-Both report TTFT/ITL/throughput distributions. Neither validates output, which
-is why layer 3 exists.
+`--network host` is required because port 8083 is bound to loopback.
+Run one invocation per `streams` value; a comma list is not parsed there.
+
+It reports TTFT/ITL/TPOT/throughput distributions but does not validate
+output, which is why layer 3 exists.
 
 ## Interpreting results against the roles
 
@@ -140,6 +156,29 @@ Concurrency 8 against 4 slots shows the queueing honestly: aggregate rises
 latency for throughput, which is the right shape for `bulk` and the wrong one
 for `fast`.
 
+### Layer 2b — `guidellm` 0.7.3, controlled concurrency (direct, 256→128 tok)
+
+| streams | TTFT p50 | TTFT p95 | ITL p50 | TPOT p50 | output t/s |
+|---|---|---|---|---|---|
+| 1 | 383 ms | 445 ms | 8.5 ms | 11.3 ms | 90.3 |
+| **4** | 933 ms | 1304 ms | 17.3 ms | 24.5 ms | **166.4** |
+| 8 | 4623 ms | 4958 ms | 17.1 ms | 53.0 ms | 158.7 |
+
+**Throughput peaks at concurrency 4 and declines at 8**, while TTFT rises 5x.
+Past 4 slots there is no trade — you lose latency *and* throughput. This puts
+`LLAMACPP_PARALLEL=4` exactly at the knee, and gives consumers a hard ceiling:
+**do not exceed 4 in-flight requests to this box.**
+
+Worth noting the two tools disagree in a useful way. `scripts/benchmark.sh`
+showed aggregate throughput still *rising* from concurrency 4 to 8 (123→143
+t/s) because it fires unpaced bursts; guidellm's paced load exposes the
+decline. Cross-checking with an independent tool is what surfaced the knee —
+neither number is wrong, they measure different arrival patterns.
+
+TTFT/ITL otherwise corroborate layer 2 closely (383 ms vs 281 ms at
+concurrency 1; the gap is guidellm's 264-token prompt against ~200, plus
+tokenization).
+
 ### Layer 3 — contract dimensions
 
 | dimension | result |
@@ -158,11 +197,60 @@ for `fast`.
 Identical direct and through the gateway — no correctness is lost in the
 LiteLLM path.
 
+### Layer 3b — task shapes (the work this stack actually serves)
+
+| task | result | median latency |
+|---|---|---|
+| extraction (invoice → JSON) | **100%** | 0.58 s |
+| classification (enum label) | **100%** | 0.46 s |
+| grounded QA, answer present | **100%** | 0.16 s |
+| grounded QA, must refuse | **100%** | 0.14 s |
+| tool selection among 3 tools | **100%** | 0.30 s |
+| code generation (executed and asserted) | **100%** | 0.46 s |
+| arithmetic, forced terse | **0%** | 0.21 s |
+| arithmetic, steps + schema | **100%** | 3.81 s |
+
+The grounded-QA pair matters most for a stack feeding a retrieval plane: the
+model answers from context when the answer is there **and** returns
+`NOT_IN_CONTEXT` when it is not. Hallucinating under a "answer only from
+context" instruction would be the expensive failure, and it does not.
+
+Code generation is checked by `exec`-ing the output and asserting behaviour,
+not by looking for plausible-looking code.
+
+#### The arithmetic finding — read this before writing prompts
+
+Same calculation, three ways:
+
+| prompting | correct | tokens | terminates |
+|---|---|---|---|
+| "reply with just the number" | **0/5** | 6 | ✓ |
+| "work step by step" | 3/3 | 2500+ | ✗ `finish=length` |
+| **schema with `steps[]` + `answer`** | **4/4** | 398 | ✓ |
+
+Forced terse, it answers in 6 tokens and is confidently wrong — 136.3, 137.2,
+163.1, 216.7 against a true 129.3. Given room to work it is correct, but keeps
+deliberating past 2500 tokens and never emits a clean final line.
+
+A JSON schema with a working field fixes both: it gives the model somewhere to
+compute and forces termination. **This is the pattern to use for any computed
+value**, and it matters here because `gpu/chat/bulk` and `gpu/chat/fast` set
+`enable_thinking: false` — which is precisely the terse regime.
+
+This is not a quant artifact to fix by moving to `IQ4_XS`; it is how the model
+behaves when denied working space.
+
 `UD-Q3_K_XL` was chosen for residency over fidelity, so 100% on tool calling
 and structured output at Q3 is the load-bearing result: it removes the reason
 to move to `IQ4_XS` and accept expert offload.
 
 ### Two findings this produced
+
+3. **Concurrency beyond `PARALLEL` is strictly worse**, not a latency /
+   throughput trade — throughput fell from 166.4 to 158.7 t/s while TTFT went
+   from 933 ms to 4623 ms.
+4. **Computed values need a schema with a working field.** Forced-terse
+   arithmetic was 0/5 and confidently wrong.
 
 1. **Per-slot context must exceed the contract floor.** At exactly 32768 a
    real 32k prompt was rejected — `request (33366 tokens) exceeds the

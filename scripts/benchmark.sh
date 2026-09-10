@@ -272,8 +272,127 @@ for depth in ([4000] if QUICK else [4000, 16000, 30000]):
         print(f"  {R}✗{N} ~{depth//1000:2d}k words  {type(e).__name__}: {e}")
         results[f"ctx:{depth}"] = False
 
+# ------------------------------------------------------- task shapes
+print(f"\n{C}== 5. Task shapes ==={N}")
+print("   The work this stack actually serves. Each case has a checkable answer,")
+print("   so this measures usable output rather than plausible-looking output.")
+
+TASKS = [
+    # (name, messages, extra params, checker)
+    ("extraction",
+     [{"role": "user", "content":
+       "Extract the invoice fields as JSON.\n\n"
+       "INVOICE\nVendor: Crimson Energy Pvt Ltd\nInvoice No: CE-2291\n"
+       "Date: 2026-03-14\nSubtotal: 48200.00 INR\nGST 18%: 8676.00 INR\n"
+       "Total: 56876.00 INR"}],
+     {"response_format": {"type": "json_schema", "json_schema": {"name": "inv", "schema": {
+         "type": "object", "properties": {
+             "invoice_no": {"type": "string"}, "total": {"type": "number"},
+             "currency": {"type": "string"}},
+         "required": ["invoice_no", "total", "currency"], "additionalProperties": False}}}},
+     lambda t: (lambda o: o.get("invoice_no") == "CE-2291" and abs(float(o.get("total", 0)) - 56876.0) < 0.5)(json.loads(t))),
+
+    ("classification",
+     [{"role": "user", "content":
+       "Classify the support ticket into exactly one of: billing, outage, feature_request, security.\n\n"
+       "Ticket: 'Our API keys appear in the response headers of /v1/status. Please advise urgently.'"}],
+     {"response_format": {"type": "json_schema", "json_schema": {"name": "cls", "schema": {
+         "type": "object", "properties": {"label": {"type": "string",
+             "enum": ["billing", "outage", "feature_request", "security"]}},
+         "required": ["label"], "additionalProperties": False}}}},
+     lambda t: json.loads(t).get("label") == "security"),
+
+    ("grounded QA (answer present)",
+     [{"role": "user", "content":
+       "Answer ONLY from the context. If the answer is not in the context, reply exactly: NOT_IN_CONTEXT\n\n"
+       "Context: The Ratnagiri plant commissioned its second 40 MW turbine in "
+       "August 2025. The first turbine, rated 25 MW, has run since 2019.\n\n"
+       "Question: What is the rating of the turbine commissioned in August 2025?"}],
+     {}, lambda t: "40" in t and "NOT_IN_CONTEXT" not in t),
+
+    ("grounded QA (must refuse)",
+     [{"role": "user", "content":
+       "Answer ONLY from the context. If the answer is not in the context, reply exactly: NOT_IN_CONTEXT\n\n"
+       "Context: The Ratnagiri plant commissioned its second 40 MW turbine in "
+       "August 2025. The first turbine, rated 25 MW, has run since 2019.\n\n"
+       "Question: Who is the plant manager at Ratnagiri?"}],
+     {}, lambda t: "NOT_IN_CONTEXT" in t.upper()),
+
+    # Two variants of the SAME arithmetic, deliberately. The gap between them
+    # is the finding: this model cannot do multi-step arithmetic in one shot,
+    # but is reliable when the schema gives it somewhere to work.
+    # "forced terse" is EXPECTED to score poorly — it documents the trap, and
+    # a sudden 100% there would mean the model changed, not that a bug is gone.
+    ("arithmetic, forced terse [expected poor]",
+     [{"role": "user", "content":
+       "A turbine generates 40 MW. It runs at 82% capacity factor for a full "
+       "365-day year. Electricity sells at 4.5 INR per kWh. What is the annual "
+       "revenue in crore INR? Reply with just the number, rounded to one decimal."}],
+     {"temperature": 0},
+     lambda t: any(abs(float(n) - 129.3) < 1.0
+                   for n in __import__("re").findall(r"\d+\.\d+|\d+", t.replace(",", "")))),
+
+    ("arithmetic, steps+schema",
+     [{"role": "user", "content":
+       "A turbine generates 40 MW. It runs at 82% capacity factor for a full "
+       "365-day year. Electricity sells at 4.5 INR per kWh. What is the annual "
+       "revenue in crore INR? Show your steps."}],
+     {"temperature": 0,
+      "response_format": {"type": "json_schema", "json_schema": {"name": "calc", "schema": {
+          "type": "object", "properties": {
+              "steps": {"type": "array", "items": {"type": "string"}, "minItems": 2},
+              "answer_crore_inr": {"type": "number"}},
+          "required": ["steps", "answer_crore_inr"], "additionalProperties": False}}}},
+     lambda t: abs(float(json.loads(t)["answer_crore_inr"]) - 129.3) < 1.0),
+
+    ("tool selection among several",
+     [{"role": "user", "content": "What will the weather be in Pune tomorrow?"}],
+     {"tools": [
+         {"type": "function", "function": {"name": "search_docs",
+          "parameters": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}}},
+         {"type": "function", "function": {"name": "get_weather",
+          "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}},
+         {"type": "function", "function": {"name": "send_email",
+          "parameters": {"type": "object", "properties": {"to": {"type": "string"}}, "required": ["to"]}}}]},
+     "TOOL:get_weather"),
+
+    ("code generation",
+     [{"role": "user", "content":
+       "Write a Python function `dedupe_keep_order(xs)` returning a list with "
+       "duplicates removed, preserving first-seen order. Code only, no prose, no markdown fence."}],
+     {}, lambda t: (lambda ns: (exec(t.replace("```python","").replace("```",""), ns),
+                                ns["dedupe_keep_order"]([3,1,3,2,1]) == [3,1,2])[1])({})),
+]
+
+for name, msgs, extra, check in TASKS:
+    lats, good = [], 0
+    n = max(3, TRIALS // 3)
+    for _ in range(n):
+        try:
+            payload = {"model": MODEL, "max_tokens": 400, "messages": msgs}
+            payload.update(extra)
+            d, dt, _ = post(payload, timeout=300)
+            lats.append(dt)
+            m = d["choices"][0]["message"]
+            if isinstance(check, str) and check.startswith("TOOL:"):
+                tc = m.get("tool_calls") or []
+                if tc and tc[0]["function"]["name"] == check[5:]:
+                    good += 1
+            else:
+                if check((m.get("content") or "").strip()):
+                    good += 1
+        except Exception:
+            pass
+    rate = good / n * 100
+    col = G if rate >= 90 else (Y if rate >= 60 else R)
+    lat = f"{statistics.median(lats):5.2f}s" if lats else "  n/a"
+    print(f"  {col}{rate:5.0f}%{N} {name:30} {good}/{n}   median {lat}")
+    results[f"task:{name}"] = rate
+
 print(f"\n{C}== summary =={N}")
-fails = [k for k, v in results.items() if v is False or (isinstance(v, (int, float)) and k.startswith(("tool:", "json:")) and v < 70)]
+fails = [k for k, v in results.items()
+         if v is False or (isinstance(v, (int, float)) and k.startswith(("tool:", "json:", "task:"))
+                           and "expected poor" not in k and v < 70)]
 print(f"  {G}all contract dimensions passed{N}" if not fails else f"  {R}attention: {', '.join(fails)}{N}")
 print(json.dumps({k: (round(v, 2) if isinstance(v, float) else v) for k, v in results.items()
                   if not isinstance(v, dict)}, indent=2))
