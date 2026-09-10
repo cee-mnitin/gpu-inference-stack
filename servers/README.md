@@ -96,6 +96,49 @@ nano .env
 
 ### Customizing a Profile
 
+## Bind the consumer contract, or say why not
+
+A profile's job is to answer one question per role: **which weights serve it,
+on which backend.** The role NAMES are fixed (`gpu/chat/interactive`,
+`gpu/chat/bulk`, …); the weights are this box's business. That split is the
+whole portability guarantee — one consumer preset moves between a 48 GB A6000
+and a 97 GB Blackwell without either side editing YAML.
+
+```
+server-a6000-48gb.env      interactive/bulk/fast -> qwen3-next-80b
+server-blackwell-97gb.env  interactive          -> qwen38-flash-next
+                           bulk, fast           -> UNSERVED (declared)
+```
+
+`config/litellm/config.yaml` reads `model: os.environ/CONTRACT_<ROLE>_MODEL`
+**bare — no fallback.** Leave it unset and LiteLLM still publishes the alias
+in `/v1/models` while every request to it returns 500, which from a consumer's
+side is indistinguishable from a role the box deliberately does not serve.
+
+So a role must be either **bound** or **declared unserved**:
+
+```bash
+CONTRACT_BULK_MODEL=openai/your-model      # bound
+CONTRACT_BULK_API_BASE=http://vllm:8000/v1
+
+CONTRACT_UNSERVED_ROLES="bulk fast"        # or declared unserved
+```
+
+`scripts/deploy.sh` **refuses to start** a stack with a role that is neither
+(`ALLOW_UNBOUND_CONTRACT_ROLES=1` overrides, for a live migration). One model
+may serve several roles — `server-a6000-48gb.env` points all three chat roles
+at the same weights.
+
+Declaring a role unserved does **not** unpublish its alias: `config/litellm`
+is shared by every profile, so `/v1/models` still lists it. That is the
+consumer's cue to reach the role on a box that serves it
+(`gpu.<server>/chat/bulk`), which is what the contract's server-addressed
+indirection is for.
+
+`server-default.env`, `server-high-vram.env` and `server-multi-gpu.env` bind
+no chat role — they are starting points, and deploy will refuse until you
+bind or declare each one.
+
 All profiles are starting points. Customize based on:
 
 1. **Your GPU**: Check VRAM with `nvidia-smi`

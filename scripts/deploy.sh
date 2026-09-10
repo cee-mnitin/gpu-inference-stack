@@ -189,6 +189,65 @@ if [ "$_contract_warn" = "1" ]; then
     echo ""
 fi
 
+# Same "published but broken" trap, one axis over: the api_base vars above all
+# have a :- fallback, but CONTRACT_<ROLE>_MODEL has NONE — config/litellm reads
+# `model: os.environ/CONTRACT_<ROLE>_MODEL` bare for the chat roles. Unset,
+# LiteLLM still publishes the alias and every request to it 500s, which from
+# outside is indistinguishable from a role this box does not serve.
+#
+# Not hypothetical, and not always a mistake: server-blackwell-97gb.env
+# deliberately serves neither bulk nor fast (Flash-Next is effectively
+# single-slot at 97 GB, and `fast` carries a 60s timeout), while
+# server-default.env / -high-vram.env / -multi-gpu.env bind no chat role at
+# all. The first is a design decision and the last three are unfinished
+# profiles, and an unset variable cannot tell them apart.
+#
+# So say which: list intentionally-unserved roles in CONTRACT_UNSERVED_ROLES.
+# A role that is neither bound nor declared unserved stops the deploy.
+#
+#   CONTRACT_UNSERVED_ROLES="bulk fast"
+#
+# Declaring a role unserved does NOT unpublish its alias — config/litellm is
+# shared by every profile, so /v1/models still lists it. That is the consumer's
+# cue to address the role on a box that serves it (gpu.<server>/chat/bulk),
+# which is what the contract's server-addressed indirection is for.
+_unserved=" $(echo "${CONTRACT_UNSERVED_ROLES:-}" | tr 'A-Z' 'a-z') "
+_unbound=""
+for _role in INTERACTIVE BULK FAST; do
+    _lc="$(echo "$_role" | tr 'A-Z' 'a-z')"
+    eval "_model=\${CONTRACT_${_role}_MODEL:-}"
+    eval "_alias=\${CONTRACT_${_role}_ALIAS:-}"
+    case "$_unserved" in *" $_lc "*) continue ;; esac
+    if [ -z "$_model" ] && [ -z "$_alias" ]; then
+        _unbound="$_unbound gpu/chat/$_lc"
+    fi
+done
+if [ -n "$_unbound" ]; then
+    echo -e "${RED}Contract roles are PUBLISHED but UNBOUND:${NC}"
+    for _r in $_unbound; do echo "  $_r — no CONTRACT_*_MODEL set"; done
+    echo ""
+    echo "  LiteLLM publishes these in /v1/models and every request to them"
+    echo "  returns 500, so a consumer cannot tell them from a working role."
+    echo ""
+    echo "  Either bind them in your servers/*.env — one model may serve"
+    echo "  several roles, as server-a6000-48gb.env points all three chat"
+    echo "  roles at the same weights — or declare the omission:"
+    echo ""
+    echo "      CONTRACT_UNSERVED_ROLES=\"bulk fast\""
+    echo ""
+    echo "  Refusing to deploy a stack that lies about what it serves."
+    echo "  ALLOW_UNBOUND_CONTRACT_ROLES=1 overrides, for a live migration."
+    if [ "${ALLOW_UNBOUND_CONTRACT_ROLES:-0}" != "1" ]; then
+        exit 1
+    fi
+fi
+if [ -n "${CONTRACT_UNSERVED_ROLES:-}" ]; then
+    echo -e "${YELLOW}Roles declared UNSERVED on this box:${NC} ${CONTRACT_UNSERVED_ROLES}"
+    echo "  Their aliases stay in /v1/models (config/litellm is shared)."
+    echo "  Consumers must reach those roles on a box that serves them."
+    echo ""
+fi
+
 # Pull images.
 # --ignore-buildable: litellm is built from config/litellm/Dockerfile (it needs
 # Pillow for the Ollama vision path), so it has no upstream tag to pull. Under
