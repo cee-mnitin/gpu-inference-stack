@@ -24,8 +24,29 @@ RED=$'\033[0;31m'; YELLOW=$'\033[1;33m'; DIM=$'\033[2m'; NC=$'\033[0m'
 my_addrs="$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
 [ -n "$my_addrs" ] || my_addrs="$(hostname -I 2>/dev/null | tr ' ' '\n')"
 
-register="$PROJECT_ROOT/.env.example"
-[ -f "$PROJECT_ROOT/.env" ] && register="$PROJECT_ROOT/.env"
+# Read the fleet register from BOTH files, .env winning on a duplicate octet.
+#
+# NOT ".env if it exists, else .env.example". A box upgrading from an older
+# checkout has a .env that predates the fleet block entirely, so preferring it
+# yielded ZERO entries and detection failed on a host whose address was sitting
+# right there — which is exactly what happened on crimson-llm2. .env.example is
+# the committed register and is present on every checkout; .env only ever adds
+# to it or overrides a line.
+_fleet_lines() {
+    local seen=" "
+    local f line octet
+    for f in "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.example"; do
+        [ -f "$f" ] || continue
+        while IFS= read -r line; do
+            octet="${line#GPU_}"; octet="${octet%%_URL=*}"
+            case "$seen" in *" $octet "*) continue ;; esac
+            seen="$seen$octet "
+            printf '%s\n' "$line"
+        done < <(grep -E '^GPU_[0-9A-Za-z_]+_URL=' "$f" 2>/dev/null)
+    done
+}
+
+register="$PROJECT_ROOT/.env.example + .env"
 
 matches=""
 while IFS= read -r line; do
@@ -36,7 +57,7 @@ while IFS= read -r line; do
     if printf '%s\n' "$my_addrs" | grep -qx -- "$addr"; then
         matches="$matches $octet"
     fi
-done < <(grep -E '^GPU_[0-9A-Za-z_]+_URL=' "$register" 2>/dev/null)
+done < <(_fleet_lines)
 
 # Deduplicate; a host legitimately holds both a LAN and a Netbird address, and
 # both can point at the same octet entry.
@@ -50,10 +71,19 @@ if [ "$n" -gt 1 ]; then
 fi
 
 if [ "$n" -eq 0 ]; then
-    echo "${YELLOW}Could not match this host to a fleet entry in ${register##*/}.${NC}" >&2
+    _entries="$(_fleet_lines)"
+    echo "${YELLOW}Could not match this host to a fleet entry.${NC}" >&2
     echo "${DIM}  Addresses found:$(printf ' %s' $my_addrs)${NC}" >&2
-    echo "${DIM}  Fleet entries:${NC}" >&2
-    grep -E '^GPU_[0-9A-Za-z_]+_URL=' "$register" 2>/dev/null | sed 's/^/    /' >&2
+    if [ -z "$_entries" ]; then
+        echo "${RED}  The fleet register is EMPTY — neither .env nor .env.example" >&2
+        echo "  defines any GPU_<octet>_URL.${NC}" >&2
+        echo "${DIM}  That block is what detection matches against. If this checkout" >&2
+        echo "  predates it, 'git pull' brings it in via .env.example.${NC}" >&2
+    else
+        echo "${DIM}  Fleet entries (.env overriding .env.example):${NC}" >&2
+        printf '%s\n' "$_entries" | sed 's/^/    /' >&2
+        echo "${DIM}  None of them names an address this host holds.${NC}" >&2
+    fi
     exit 1
 fi
 
