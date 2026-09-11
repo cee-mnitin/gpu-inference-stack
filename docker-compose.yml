@@ -377,7 +377,25 @@ services:
   # LITELLM - Unified LLM Gateway
   # ============================================================================
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    # BUILT, not pulled. config/litellm/Dockerfile bakes Pillow into the
+    # upstream image; without it every Ollama-backed gpu/chat/vision call fails
+    # with "ollama image conversion failed / No module named 'PIL'" — and fails
+    # INVISIBLY to a contract probe, because the alias is present in /v1/models
+    # and Ollama is healthy, so a consumer's boot check passes and only real
+    # requests 500.
+    #
+    # The build section was lost when docker-compose.yml was reverted over
+    # newer work; the Dockerfile survived but nothing referenced it, so the
+    # layer silently stopped being applied. Restored here.
+    #
+    # `pull_policy: build` keeps `compose up` from trying to fetch the local
+    # tag from a registry, and `make setup` builds with --pull so the mutable
+    # main-latest base is re-resolved rather than served from layer cache.
+    image: gpu-inference-stack-litellm:latest
+    pull_policy: build
+    build:
+      context: ./config/litellm
+      dockerfile: Dockerfile
     container_name: litellm
     restart: unless-stopped
     ports:

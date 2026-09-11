@@ -23,6 +23,29 @@ Override with `make setup PROFILE=85`; skip the prompt with `AUTO=1`.
 | `make models` / `make urls` | what is serving / endpoints |
 | `make logs` / `make check` | tail logs / prerequisites only |
 
+### Making sure you run the version you configured
+
+Pinned images (vLLM, Infinity, Redis…) just work: change `VLLM_IMAGE` in the
+profile, `make setup` pulls the new tag, `make start` recreates the container
+because the image changed.
+
+The locally built one needs more care. `config/litellm/Dockerfile` bakes Pillow
+into `ghcr.io/berriai/litellm:main-latest`, and that base tag is **mutable** —
+so `make setup` builds with `--pull`, re-resolving the base instead of reusing a
+cached layer and handing you last month's litellm from an apparently successful
+build. Use `make setup REBUILD=1` to add `--no-cache` when a layer is wrong
+rather than merely stale.
+
+Then verify rather than assume:
+
+```bash
+make versions     # configured image vs the image each container is running
+```
+
+Those are different questions, and `docker ps` only answers the second. They
+diverge exactly when you have bumped a version and not restarted — `make setup`
+prints this at the end for that reason, and `make start` is what closes the gap.
+
 For anything ad-hoc use `scripts/dc.sh`. **A bare `docker compose` does not see
 the profile** — it reads `.env` only, so every profile value falls back to a
 compose default written for a different class of card.

@@ -45,7 +45,7 @@ $(shell set -a; [ -f "$(PROFILE_FILE)" ] && . "./$(PROFILE_FILE)"; [ -f .env ] &
 endef
 
 .PHONY: help setup start stop restart status logs health models urls \
-        check pull build clean _require_profile
+        check pull build clean versions _require_profile
 
 help:
 	@printf "$(BOLD)gpu-inference-stack$(RST)\n\n"
@@ -57,6 +57,7 @@ help:
 	@printf "  make status   containers + GPU       make health   full health check\n"
 	@printf "  make models   what is served now     make urls     endpoints\n"
 	@printf "  make logs     tail all logs             make check    prerequisites only\n"
+	@printf "  make versions configured vs running images\n"
 	@printf "  $(DIM)make clean    also removes volumes (keys, dashboards) — asks first$(RST)\n\n"
 	@printf "  $(DIM)Override detection:  make setup PROFILE=85$(RST)\n"
 	@printf "  $(DIM)Non-interactive:     make setup AUTO=1$(RST)\n"
@@ -114,7 +115,15 @@ setup:
 	@printf "\n$(BOLD)4/5  Pulling images$(RST)  $(DIM)(--ignore-buildable: litellm is built locally)$(RST)\n"
 	@$(DC) $(enabled_profiles) pull --ignore-buildable
 	@printf "\n$(BOLD)5/5  Building local images$(RST)\n"
-	@$(DC) $(enabled_profiles) build
+	@# --pull re-resolves the FROM tag. litellm's base is `main-latest`, which
+	@# is MUTABLE: without this, `build` happily reuses a cached base layer and
+	@# you get last month's litellm from an apparently successful build. A
+	@# pinned base would not need it; a mutable one always does.
+	@# REBUILD=1 adds --no-cache for the case where a layer is wrong rather
+	@# than stale.
+	@$(DC) $(enabled_profiles) build --pull $(if $(filter 1,$(REBUILD)),--no-cache,)
+	@printf "\n$(BOLD)Resolved image versions$(RST)  $(DIM)(what you will actually run)$(RST)\n"
+	@$(MAKE) --no-print-directory versions
 	@printf "\n$(GRN)$(BOLD)Setup complete.$(RST)  Run $(BOLD)make start$(RST)\n"
 
 # ---------------------------------------------------------------------------
@@ -226,12 +235,14 @@ urls: _require_profile
 	printf "\n  $(DIM)A consumer needs a VIRTUAL key, not the master key:$(RST)\n"; \
 	printf "  $(DIM)curl -X POST http://%s:%s/key/generate -H \"Authorization: Bearer \$$LITELLM_MASTER_KEY\" \\$(RST)\n" "$$host" "$${LITELLM_PORT:-8080}"; \
 	printf "  $(DIM)  -H 'Content-Type: application/json' -d '{\"key_alias\":\"<app>\",\"models\":[\"gpu/chat/bulk\"]}'$(RST)\n"
+# "Configured" is what the active profile asks for; "running" is what the
+# container was actually created from. They diverge the moment a profile pins a
+# new version and nothing has restarted yet — precisely the state a version
+# bump leaves you in, and `docker ps` does not show it.
+versions: _require_profile
+	@$(DC) $(enabled_profiles) config --format json 2>/dev/null | ./scripts/versions.py
 
 # ---------------------------------------------------------------------------
-# Stops AND REMOVES the containers (compose `down`), plus the project network.
-# Named volumes and the data/ bind mounts SURVIVE — model weights, the Postgres
-# database and Grafana state are not thrown away by stopping a stack. Use
-# `make clean` for those, deliberately.
 stop: _require_profile
 	@# `--profile "*"` enables EVERY profile, which is what makes this stop
 	@# everything the project owns. --remove-orphans alone is not enough: a
