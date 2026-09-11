@@ -1,20 +1,35 @@
 # Server Profiles
 
-One knob activates a machine. Put this in `.env`:
+On a fresh machine:
 
 ```bash
-SERVER_PROFILE=63          # -> servers/server-63.env
+git pull
+make setup      # detects this server, confirms, applies its profile,
+                # checks prerequisites, pulls images, builds
+make start      # starts it, then reports models served and access URLs
 ```
 
-Then use `scripts/deploy.sh` to bring it up, or `scripts/dc.sh` for anything
-ad-hoc. **A bare `docker compose` does not see the profile** — it reads `.env`
-only, so every profile value falls back to a compose default written for a
-different class of card.
+`make setup` matches this host's IP against the fleet block and shows you what
+it found — GPU, model, context, ports, which services will run — before
+anything is written. Answer `y` and it records `SERVER_PROFILE` in `.env`.
+Override with `make setup PROFILE=85`; skip the prompt with `AUTO=1`.
+
+| | |
+|---|---|
+| `make setup` | detect, confirm, apply, check, pull, build |
+| `make start` | start + summary of models and URLs |
+| `make stop` / `make restart` | |
+| `make status` / `make health` | containers and GPU / full health check |
+| `make models` / `make urls` | what is serving / endpoints |
+| `make logs` / `make check` | tail logs / prerequisites only |
+
+For anything ad-hoc use `scripts/dc.sh`. **A bare `docker compose` does not see
+the profile** — it reads `.env` only, so every profile value falls back to a
+compose default written for a different class of card.
 
 ```bash
 scripts/dc.sh ps
 scripts/dc.sh logs -f litellm
-scripts/dc.sh config | less
 ```
 
 ## How layering works

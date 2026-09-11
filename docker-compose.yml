@@ -427,6 +427,8 @@ services:
       # Infinity serves bge-m3 AND bge-reranker-v2-m3 from one container, which
       # is why both point at the same port. On a card where TEI works, point
       # these at the `embeddings` service instead.
+      - CONTRACT_EMBED_ALIAS=${CONTRACT_EMBED_ALIAS:-gpu/embed/bge-m3}
+      - CONTRACT_RERANK_ALIAS=${CONTRACT_RERANK_ALIAS:-gpu/rerank/bge-reranker-v2-m3}
       - CONTRACT_EMBED_API_BASE=${CONTRACT_EMBED_API_BASE:-http://infinity:7997}
       - CONTRACT_RERANK_API_BASE=${CONTRACT_RERANK_API_BASE:-http://infinity:7997}
       - CONTRACT_OCR_API_BASE=${CONTRACT_OCR_API_BASE:-http://vllm:8000/v1}

@@ -169,7 +169,14 @@ model_list:
       mode: chat
       supports_vision: true
 
-  - model_name: gpu/embed/bge-m3
+  # Alias is env-driven, exactly like CONTRACT_VISION_ALIAS: a box with no
+  # embedder sets CONTRACT_EMBED_ALIAS=unserved/embed so the deployment is
+  # published OUTSIDE the gpu/ namespace. Consumers looking for gpu/embed/bge-m3
+  # then do not find it and fall back, instead of finding an alias that
+  # fails on every call — the 'published but broken' trap this contract
+  # exists to avoid. Defaults to the real name, so a box that serves it
+  # is unaffected.
+  - model_name: os.environ/CONTRACT_EMBED_ALIAS
     litellm_params:
       model: infinity/BAAI/bge-m3
       api_base: os.environ/CONTRACT_EMBED_API_BASE
@@ -178,7 +185,14 @@ model_list:
     model_info:
       mode: embedding
 
-  - model_name: gpu/rerank/bge-reranker-v2-m3
+  # Alias is env-driven, exactly like CONTRACT_VISION_ALIAS: a box with no
+  # embedder sets CONTRACT_RERANK_ALIAS=unserved/rerank so the deployment is
+  # published OUTSIDE the gpu/ namespace. Consumers looking for gpu/rerank/bge-reranker-v2-m3
+  # then do not find it and fall back, instead of finding an alias that
+  # fails on every call — the 'published but broken' trap this contract
+  # exists to avoid. Defaults to the real name, so a box that serves it
+  # is unaffected.
+  - model_name: os.environ/CONTRACT_RERANK_ALIAS
     litellm_params:
       model: infinity/BAAI/bge-reranker-v2-m3
       api_base: os.environ/CONTRACT_RERANK_API_BASE
