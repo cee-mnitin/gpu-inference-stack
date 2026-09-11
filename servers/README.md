@@ -103,6 +103,13 @@ which is the only way some models work at all:
 | `VLLM_STRUCTURED_OUTPUTS_CONFIG` | no xgrammar JSON enforcement |
 | `VLLM_EXTRA_ARGS` | appended verbatim, for anything unmodelled |
 
+Two knobs that are not about model *shape* but matter as much:
+
+| Variable | Effect |
+|---|---|
+| `VLLM_KV_CACHE_DTYPE=fp8` | halves bytes per KV token, so the same VRAM holds ~2× the cache. Measured on sm_120: 83,520 → 173,856 tokens, concurrency at 32k 2.55× → 5.31×. Use it when the workload is concurrency-bound |
+| `VLLM_GPU_MEMORY_UTILIZATION` | a fraction of the **whole** card, preallocated. Leave room for every other service on that GPU |
+
 ## Delegating a role to another box
 
 A card that cannot serve a role points it at a peer. Addresses come from the

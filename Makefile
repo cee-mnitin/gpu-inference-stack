@@ -45,7 +45,7 @@ $(shell set -a; [ -f "$(PROFILE_FILE)" ] && . "./$(PROFILE_FILE)"; [ -f .env ] &
 endef
 
 .PHONY: help setup start stop restart status logs health models urls \
-        check pull build _require_profile
+        check pull build clean _require_profile
 
 help:
 	@printf "$(BOLD)gpu-inference-stack$(RST)\n\n"
@@ -53,10 +53,11 @@ help:
 	@printf "                check prerequisites, pull images, build\n"
 	@printf "  $(BOLD)make start$(RST)    start what the profile declares, then report\n"
 	@printf "                models served and access URLs\n\n"
-	@printf "  make stop     stop everything        make restart  stop + start\n"
+	@printf "  make stop     stop + remove containers   make restart  stop + start\n"
 	@printf "  make status   containers + GPU       make health   full health check\n"
 	@printf "  make models   what is served now     make urls     endpoints\n"
-	@printf "  make logs     tail all logs          make check    prerequisites only\n\n"
+	@printf "  make logs     tail all logs             make check    prerequisites only\n"
+	@printf "  $(DIM)make clean    also removes volumes (keys, dashboards) — asks first$(RST)\n\n"
 	@printf "  $(DIM)Override detection:  make setup PROFILE=85$(RST)\n"
 	@printf "  $(DIM)Non-interactive:     make setup AUTO=1$(RST)\n"
 	@printf "  $(DIM)Ad-hoc compose:      ./scripts/dc.sh ps$(RST)\n\n"
@@ -227,10 +228,37 @@ urls: _require_profile
 	printf "  $(DIM)  -H 'Content-Type: application/json' -d '{\"key_alias\":\"<app>\",\"models\":[\"gpu/chat/bulk\"]}'$(RST)\n"
 
 # ---------------------------------------------------------------------------
+# Stops AND REMOVES the containers (compose `down`), plus the project network.
+# Named volumes and the data/ bind mounts SURVIVE — model weights, the Postgres
+# database and Grafana state are not thrown away by stopping a stack. Use
+# `make clean` for those, deliberately.
 stop: _require_profile
-	@# --remove-orphans clears containers from profiles this box has since
-	@# disabled; without it they linger and `make start` reports them forever.
-	@$(DC) $(enabled_profiles) down --remove-orphans
+	@# `--profile "*"` enables EVERY profile, which is what makes this stop
+	@# everything the project owns. --remove-orphans alone is not enough: a
+	@# service that IS defined in docker-compose.yml but whose profile is
+	@# disabled is not an orphan, so `down` skips it and it keeps running (and
+	@# keeps holding VRAM). That is exactly how a leftover ollama container
+	@# survived a stop on this box and then blocked `make start`.
+	@$(DC) --profile "*" down --remove-orphans
+	@left=$$(docker ps -a --filter "label=com.docker.compose.project=$$(basename $(ROOT))" --format '{{.Names}}' | tr '\n' ' '); \
+	 if [ -n "$$left" ]; then printf "  $(YEL)!$(RST) still present: %s\n" "$$left"; \
+	 else printf "  $(GRN)✓$(RST) containers stopped and removed $(DIM)(volumes and data/ kept)$(RST)\n"; fi
+	@command -v nvidia-smi >/dev/null && printf "  $(DIM)GPU now %s MiB used of %s MiB$(RST)\n" \
+	   "$$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" \
+	   "$$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)" || true
+
+# Destructive, and separate from `stop` for that reason: this removes the named
+# volumes too — Postgres (LiteLLM's virtual keys and spend history), Grafana
+# dashboards, Redis cache. Model weights under data/ are bind mounts and are
+# NOT touched, so a rebuild does not re-download tens of GB.
+clean: _require_profile
+	@printf "$(RED)$(BOLD)This removes containers AND named volumes.$(RST)\n"
+	@printf "  Lost: LiteLLM's Postgres (virtual keys, spend history), Grafana, Redis.\n"
+	@printf "  Kept: model weights and anything else under data/.\n\n"
+	@if [ "$(AUTO)" != "1" ]; then \
+	  read -r -p "  Type 'yes' to continue: " a; [ "$$a" = "yes" ] || { printf "  aborted\n"; exit 1; }; fi
+	@$(DC) --profile "*" down --remove-orphans --volumes
+	@printf "  $(GRN)✓$(RST) containers and volumes removed\n"
 
 restart: stop start
 
