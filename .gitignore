@@ -45,3 +45,9 @@ grafana_data/
 # Backup files
 *.backup
 *.bak
+
+# Build stamp: a hash of the local build context, written by `make build` so
+# `make setup` is idempotent instead of rebuilding on every run. Per-host
+# state, like .env — committing it would make one machine's build history
+# decide whether another machine rebuilds.
+.docker-build-hash

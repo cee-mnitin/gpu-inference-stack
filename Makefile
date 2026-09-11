@@ -60,7 +60,10 @@ help:
 	@printf "  make versions configured vs running images\n"
 	@printf "  $(DIM)make clean    also removes volumes (keys, dashboards) — asks first$(RST)\n\n"
 	@printf "  $(DIM)Override detection:  make setup PROFILE=85$(RST)\n"
-	@printf "  $(DIM)Non-interactive:     make setup AUTO=1$(RST)\n"
+	@printf "  $(DIM)AUTO=1       take the default answer to every prompt$(RST)\n"
+	@printf "  $(DIM)REBUILD=1    rebuild, reusing the Docker layer cache$(RST)\n"
+	@printf "  $(DIM)NO_CACHE=1   like REBUILD but ignore the cache$(RST)\n"
+	@printf "  $(DIM)SKIP_BUILD=1 skip the build$(RST)\n"
 	@printf "  $(DIM)Ad-hoc compose:      ./scripts/dc.sh ps$(RST)\n\n"
 	@if [ -n "$(PROFILE_NAME)" ]; then \
 	  printf "  Active profile: $(BOLD)$(PROFILE_NAME)$(RST)  $(DIM)($(PROFILE_FILE))$(RST)\n\n"; \
@@ -98,10 +101,12 @@ setup:
 	   "$${ENABLE_VLLM:-false}" "$${ENABLE_VLLM2:-false}" "$${ENABLE_LLAMACPP:-false}" \
 	   "$${ENABLE_OLLAMA:-false}" "$${ENABLE_INFINITY:-false}" "$${ENABLE_EMBEDDINGS:-false}"; \
 	printf "\n"; \
-	if [ "$(AUTO)" != "1" ]; then \
+	if [ "$(AUTO)" = "1" ]; then \
+	  printf "  $(DIM)AUTO=1 — taking the default (apply)$(RST)\n"; \
+	else \
 	  if [ ! -t 0 ]; then printf "$(RED)Not a terminal and AUTO=1 not set — refusing to guess.$(RST)\n"; exit 1; fi; \
-	  read -r -p "  Apply this profile? [y/N] " a; \
-	  case "$$a" in y|Y|yes|YES) ;; *) printf "  aborted\n"; exit 1;; esac; \
+	  read -r -p "  Apply this profile? [Y/n] " a; \
+	  case "$$a" in ""|y|Y|yes|YES) ;; *) printf "  aborted\n"; exit 1;; esac; \
 	fi; \
 	if [ ! -f .env ]; then cp .env.example .env; printf "\n  created .env from .env.example\n"; fi; \
 	if grep -q '^SERVER_PROFILE=' .env; then \
@@ -115,13 +120,7 @@ setup:
 	@printf "\n$(BOLD)4/5  Pulling images$(RST)  $(DIM)(--ignore-buildable: litellm is built locally)$(RST)\n"
 	@$(DC) $(enabled_profiles) pull --ignore-buildable
 	@printf "\n$(BOLD)5/5  Building local images$(RST)\n"
-	@# --pull re-resolves the FROM tag. litellm's base is `main-latest`, which
-	@# is MUTABLE: without this, `build` happily reuses a cached base layer and
-	@# you get last month's litellm from an apparently successful build. A
-	@# pinned base would not need it; a mutable one always does.
-	@# REBUILD=1 adds --no-cache for the case where a layer is wrong rather
-	@# than stale.
-	@$(DC) $(enabled_profiles) build --pull $(if $(filter 1,$(REBUILD)),--no-cache,)
+	@$(MAKE) --no-print-directory build
 	@printf "\n$(BOLD)Resolved image versions$(RST)  $(DIM)(what you will actually run)$(RST)\n"
 	@$(MAKE) --no-print-directory versions
 	@printf "\n$(GRN)$(BOLD)Setup complete.$(RST)  Run $(BOLD)make start$(RST)\n"
@@ -266,7 +265,13 @@ clean: _require_profile
 	@printf "$(RED)$(BOLD)This removes containers AND named volumes.$(RST)\n"
 	@printf "  Lost: LiteLLM's Postgres (virtual keys, spend history), Grafana, Redis.\n"
 	@printf "  Kept: model weights and anything else under data/.\n\n"
-	@if [ "$(AUTO)" != "1" ]; then \
+	@if [ "$(AUTO)" = "1" ]; then \
+	  printf "  $(YEL)AUTO=1 takes the default, and the default here is NO.$(RST)\n"; \
+	  printf "  $(DIM)Destroying keys and spend history is not something an unattended$(RST)\n"; \
+	  printf "  $(DIM)run should be able to do. Re-run interactively, or FORCE=1.$(RST)\n"; \
+	  [ "$(FORCE)" = "1" ] || exit 1; \
+	  printf "  $(RED)FORCE=1 — proceeding$(RST)\n"; \
+	elif [ "$(FORCE)" != "1" ]; then \
 	  read -r -p "  Type 'yes' to continue: " a; [ "$$a" = "yes" ] || { printf "  aborted\n"; exit 1; }; fi
 	@$(DC) --profile "*" down --remove-orphans --volumes
 	@printf "  $(GRN)✓$(RST) containers and volumes removed\n"
@@ -286,5 +291,33 @@ health: _require_profile
 pull: _require_profile
 	@$(DC) $(enabled_profiles) pull --ignore-buildable
 
+# Folded into `setup`, and forceable on its own — the workspace convention:
+#   (bare)        build only when it is actually needed
+#   REBUILD=1     rebuild, reusing the Docker layer cache
+#   NO_CACHE=1    like REBUILD but ignore the cache (--no-cache --pull)
+#   SKIP_BUILD=1  skip the build entirely
+#
+# "Needed" means the image is missing, or the build context has changed since
+# it was built. The stamp is a hash of config/litellm/, so editing the
+# Dockerfile triggers a rebuild without anyone having to remember REBUILD=1 —
+# the failure that flag exists to work around elsewhere.
+#
+# --pull is ALWAYS passed when building. The base is `main-latest`, which is
+# mutable: without it, `build` reuses a cached FROM layer and an apparently
+# successful build hands you a month-old litellm. A pinned base would not need
+# this; a mutable one always does.
+BUILD_STAMP := .docker-build-hash
+build_ctx_hash = $(shell find config/litellm -type f 2>/dev/null | sort | xargs sha1sum 2>/dev/null | sha1sum | cut -c1-16)
+
 build: _require_profile
-	@$(DC) $(enabled_profiles) build
+	@if [ "$(SKIP_BUILD)" = "1" ]; then printf "  $(DIM)skipped (SKIP_BUILD=1)$(RST)\n"; exit 0; fi; \
+	 want="$(build_ctx_hash)"; have="$$(cat $(BUILD_STAMP) 2>/dev/null || true)"; \
+	 have_img=$$(docker image inspect gpu-inference-stack-litellm:latest >/dev/null 2>&1 && echo yes || echo no); \
+	 if [ "$(NO_CACHE)" = "1" ]; then why="NO_CACHE=1"; flags="--pull --no-cache"; \
+	 elif [ "$(REBUILD)" = "1" ]; then why="REBUILD=1"; flags="--pull"; \
+	 elif [ "$$have_img" = "no" ]; then why="image missing"; flags="--pull"; \
+	 elif [ "$$want" != "$$have" ]; then why="build context changed"; flags="--pull"; \
+	 else printf "  $(GRN)✓$(RST) image up to date $(DIM)(context unchanged — force with REBUILD=1)$(RST)\n"; exit 0; fi; \
+	 printf "  building $(DIM)(%s)$(RST)\n" "$$why"; \
+	 $(DC) $(enabled_profiles) build $$flags; \
+	 printf '%s' "$$want" > $(BUILD_STAMP)

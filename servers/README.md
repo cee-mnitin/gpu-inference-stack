@@ -11,8 +11,23 @@ make start      # starts it, then reports models served and access URLs
 
 `make setup` matches this host's IP against the fleet block and shows you what
 it found — GPU, model, context, ports, which services will run — before
-anything is written. Answer `y` and it records `SERVER_PROFILE` in `.env`.
-Override with `make setup PROFILE=85`; skip the prompt with `AUTO=1`.
+anything is written. Accept and it records `SERVER_PROFILE` in `.env`.
+Override detection with `make setup PROFILE=85`.
+
+Flags follow the workspace convention used by the deepdarshak `make` targets:
+
+| Flag | Effect |
+|---|---|
+| `AUTO=1` | take the **default** answer to every prompt — apply on `setup`, and *decline* on `clean`, because an unattended run must not be able to destroy a stack's keys and history |
+| `REBUILD=1` | rebuild, reusing the Docker layer cache |
+| `NO_CACHE=1` | like `REBUILD` but ignore the cache (`--no-cache --pull`) |
+| `SKIP_BUILD=1` | skip the build |
+| `FORCE=1` | the deliberate escape for `clean`, unattended |
+
+Build is folded into `setup` and runs only when needed: the image is missing,
+or the build context changed. `.docker-build-hash` records a hash of
+`config/litellm/`, so editing the Dockerfile triggers a rebuild without anyone
+having to remember `REBUILD=1`.
 
 | | |
 |---|---|
