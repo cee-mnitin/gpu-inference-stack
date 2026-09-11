@@ -133,8 +133,20 @@ services:
     <<: *vllm-instance
     container_name: vllm-new
     profiles: [vllm]
+    # EXPOSURE IS A CHOICE. VLLM_BIND_ADDR decides who can reach this engine
+    # directly, bypassing the gateway:
+    #   0.0.0.0    (default) reachable from other hosts — needed where a legacy
+    #              consumer dials the engine port, as crimson-llm2's
+    #              qwen3.6-vllm-direct alias does
+    #   127.0.0.1  loopback only: LiteLLM still reaches it over the compose
+    #              network, so the CONTRACT is unaffected, but nothing off-box
+    #              can skip the gateway's auth, rate limits and spend tracking
+    #
+    # Loopback is the better default for a new box; 0.0.0.0 is kept as the
+    # shipped default only because changing it would silently cut existing
+    # direct consumers.
     ports:
-      - "${VLLM_PORT:-8000}:8000"
+      - "${VLLM_BIND_ADDR:-0.0.0.0}:${VLLM_PORT:-8000}:8000"
     environment: &vllm-1-env
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -167,7 +179,7 @@ services:
     container_name: vllm2
     profiles: [vllm2]
     ports:
-      - "${VLLM2_PORT:-8010}:8000"
+      - "${VLLM2_BIND_ADDR:-0.0.0.0}:${VLLM2_PORT:-8010}:8000"
     environment:
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -192,7 +204,7 @@ services:
     container_name: vllm3
     profiles: [vllm3]
     ports:
-      - "${VLLM3_PORT:-8011}:8000"
+      - "${VLLM3_BIND_ADDR:-0.0.0.0}:${VLLM3_PORT:-8011}:8000"
     environment:
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -220,17 +232,57 @@ services:
       - vllm-router
     restart: unless-stopped
     ports:
-      - "${VLLM_ROUTER_PORT:-8001}:8080"
+      - "${VLLM_ROUTER_BIND_ADDR:-0.0.0.0}:${VLLM_ROUTER_PORT:-8001}:8080"
     volumes:
-      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # .template + the templates dir: the image's entrypoint runs envsubst
+      # over these into /etc/nginx/, which is how ${ROUTER_HOST_*} become
+      # real hostnames before nginx parses the file.
+      - ./config/nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
       - ./config/nginx/router.js:/etc/nginx/njs/router.js:ro
+    environment:
+      # njs builds its model map from these at request time, so the router
+      # advertises and routes exactly what THIS box serves. Defaults mirror the
+      # vllm services' own defaults; instances 2 and 3 stay empty unless the
+      # profile names them, and an empty name is simply left out of the map.
+      - ROUTER_MODEL_1=${VLLM_MODEL_NAME:-qwen3.6}
+      - ROUTER_UPSTREAM_1=@vllm_1
+      - ROUTER_MODEL_2=${VLLM2_MODEL_NAME-}
+      - ROUTER_UPSTREAM_2=${VLLM2_MODEL_NAME:+@vllm_2}
+      - ROUTER_MODEL_3=${VLLM3_MODEL_NAME-}
+      - ROUTER_UPSTREAM_3=${VLLM3_MODEL_NAME:+@vllm_3}
+      # Upstream hosts, substituted into nginx.conf by the image's
+      # envsubst-on-templates entrypoint. Absent instances fall back to
+      # instance 1 — inert, because njs only routes to names it has in its
+      # map, and it keeps the resolver from failing on a host that does not
+      # exist.
+      # The image's entrypoint templates /etc/nginx/templates/*.template into
+      # NGINX_ENVSUBST_OUTPUT_DIR, which defaults to conf.d/ — wrong for a
+      # whole nginx.conf, so point it at /etc/nginx. envsubst is called with an
+      # explicit list of DEFINED env vars, so nginx's own $host, $remote_addr
+      # and friends survive untouched.
+      - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
+      - ROUTER_HOST_1=vllm-new:8000
+      # Default to instance 1's host, NOT to empty: an empty value renders
+      # `server ;` and nginx refuses to start with "invalid number of
+      # arguments". The default is inert — njs only routes to names present in
+      # its map, and an absent instance contributes none.
+      #
+      # A plain `:-` default, not `${A:+x}${A:-y}`: compose has no
+      # if/else here, so that form CONCATENATES both branches when the
+      # variable is set (it produced `vllm2:8000qwen3.6-bulk`). A profile
+      # enabling instance 2 sets VLLM2_HOST alongside VLLM2_MODEL_NAME.
+      - ROUTER_HOST_2=${VLLM2_HOST:-vllm-new:8000}
+      - ROUTER_HOST_3=${VLLM3_HOST:-vllm-new:8000}
     depends_on:
       vllm:
         condition: service_healthy
     networks:
       - gpu-inference-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      # wget, not curl: nginx:alpine ships busybox wget and NO curl, so the
+      # old probe exited 127 on every run and the container sat permanently
+      # unhealthy while serving fine. Same class of bug as litellm's.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -601,7 +653,10 @@ services:
       - "${NGINX_PORT:-80}:80"
       - "${NGINX_HTTPS_PORT:-443}:443"
     volumes:
-      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # .template + the templates dir: the image's entrypoint runs envsubst
+      # over these into /etc/nginx/, which is how ${ROUTER_HOST_*} become
+      # real hostnames before nginx parses the file.
+      - ./config/nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
       - ./config/nginx/ssl:/etc/nginx/ssl:ro
     depends_on:
       - litellm
