@@ -58,18 +58,29 @@ value of any variable that makes a non-thinking model work.
 
 ### 3. The image is pinned in the file, not the profile
 
-`image: vllm/vllm-openai:v0.23.0` is hardcoded. 0.23 predates Blackwell
-(`sm_120`) and does not degrade gracefully, so the five `ddai*` boxes cannot
-run the stack as committed. Which vLLM build a box needs is a property of its
-GPU, i.e. of its server profile.
+`image: vllm/vllm-openai:v0.23.0` is hardcoded, so a box cannot pin the build
+its card is known to work with. Which vLLM build a box needs is a property of
+its GPU, i.e. of its server profile.
+
+*Corrected 2026-09-11:* this was first written as "0.23 predates Blackwell and
+does not degrade gracefully". A live inspection of crimson-llm2 shows v0.23.0
+serving Qwen3.6-35B on an RTX PRO 6000 Blackwell (sm_120, driver 570) today.
+0.23 was never tested on the 32 GB cards; v0.25.1 is pinned there because ember
+had already proven it, which is a "known-good" argument, not evidence the older
+build fails.
 
 ### 4. No embedder works on Blackwell
 
-`text-embeddings-inference` publishes turing / 89 / hopper / latest and nothing
-for `sm_120`; it crash-loops with `Runtime compute cap 120 is not compatible
-with compile time compute cap 80`. Infinity's torch engine runs there, and
-serves bge-m3 and bge-reranker-v2-m3 from one container — which is what
-`config/litellm/config.yaml` already expects.
+No *published* `text-embeddings-inference` image carries `sm_120` kernels —
+ghcr has turing / 89 / hopper / latest — and the container crash-loops with
+`Runtime compute cap 120 is not compatible with compile time compute cap 80`.
+Infinity's torch engine runs there, and serves bge-m3 and bge-reranker-v2-m3
+from one container, which is what `config/litellm/config.yaml` already expects.
+
+*Corrected 2026-09-11:* a locally built TEI **does** run on Blackwell —
+crimson-llm2 uses `osint/tei:1.9.3-sm120`. So the accurate statement is that no
+upstream tag works, not that TEI cannot. Infinity is still preferred: no custom
+image to maintain, and one container covers both the embed and rerank roles.
 
 ## Design
 

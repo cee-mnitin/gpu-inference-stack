@@ -106,9 +106,12 @@ deliberately unserved goes in `CONTRACT_UNSERVED_ROLES` so `deploy.sh` can tell
 
 ## Blackwell (sm_120) gotchas
 
-- **vLLM 0.23.0 predates sm_120** and does not degrade gracefully. Set
-  `VLLM_IMAGE=vllm/vllm-openai:v0.25.1` or newer.
-- **TEI has no Blackwell build** — turing / 89 / hopper / latest only. It
-  crash-loops with `Runtime compute cap 120 is not compatible with compile time
-  compute cap 80`. Use Infinity, which also serves the reranker from the same
-  container.
+- **Pin the vLLM build your card is known to work with** via `VLLM_IMAGE`.
+  The 32 GB profiles use `v0.25.1` because ember had already proven it there.
+  This is not evidence the `v0.23.0` default fails on Blackwell — crimson-llm2
+  serves Qwen3.6-35B on `v0.23.0` on an RTX PRO 6000 (sm_120) today.
+- **No published TEI image has sm_120 kernels** — ghcr carries turing / 89 /
+  hopper / latest, and the container crash-loops with `Runtime compute cap 120
+  is not compatible with compile time compute cap 80`. A locally built one does
+  work (`osint/tei:1.9.3-sm120` on crimson-llm2). Infinity is preferred anyway:
+  no custom image, and it serves the reranker from the same container.
