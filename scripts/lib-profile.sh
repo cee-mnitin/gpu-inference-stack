@@ -57,12 +57,54 @@ profile_path() {
     return 2   # named but not found — callers must report this, not ignore it
 }
 
-# The --env-file arguments, profile first so .env wins. Emitted as separate
+# Resolve a profile's EXTENDS chain, base first.
+#
+# A profile may declare `EXTENDS=<name>` to inherit another profile's settings,
+# which is what stops a fleet of identical boxes becoming N copies of one file.
+# The five ddai* machines share a GPU, a model and a VRAM split; without this,
+# changing the model would mean editing five files and missing one — the exact
+# drift the profile system exists to prevent.
+#
+# Emitted BASE FIRST so the deriving profile overrides it, the same last-wins
+# rule compose already applies between the profile and .env. The full order is
+#     base -> profile -> .env
+#
+# Chains are followed to a depth of 8 and a repeated name stops the walk, so a
+# cycle (A extends B extends A) terminates instead of hanging.
+profile_chain() {
+    local name="$1" depth=0 seen=" " f base
+    while [ -n "$name" ] && [ "$depth" -lt 8 ]; do
+        case "$seen" in *" $name "*)
+            echo "profile EXTENDS cycle at '$name' — stopping" >&2; break ;;
+        esac
+        seen="$seen$name "
+        f=""
+        for f in "$PROJECT_ROOT/servers/$name" \
+                 "$PROJECT_ROOT/servers/$name.env" \
+                 "$PROJECT_ROOT/servers/server-$name.env"; do
+            [ -f "$f" ] && break || f=""
+        done
+        [ -n "$f" ] || { echo "profile '$name' not found (EXTENDS chain)" >&2; break; }
+        printf '%s\n' "$f"
+        base="$(sed -n 's/^EXTENDS=//p' "$f" | tail -1 | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//')"
+        name="$base"
+        depth=$((depth + 1))
+    done
+}
+
+# The --env-file arguments: bases first, then the profile, then .env — so .env
+# always wins and a profile always beats what it extends. Emitted as separate
 # words on purpose; callers use it unquoted.
 profile_env_file_args() {
-    local p
-    p="$(profile_path)" || true
-    [ -n "$p" ] && printf -- '--env-file %s ' "$p"
+    local name p
+    name="${SERVER_PROFILE:-$(profile_env_get SERVER_PROFILE)}"
+    if [ -n "$name" ]; then
+        # profile_chain lists derived-first; reverse it so the base is passed
+        # first and the deriving profile overrides it.
+        profile_chain "$name" | tac | while IFS= read -r p; do
+            printf -- '--env-file %s ' "$p"
+        done
+    fi
     [ -f "$PROJECT_ROOT/.env" ] && printf -- '--env-file %s ' "$PROJECT_ROOT/.env"
 }
 
@@ -82,7 +124,8 @@ profile_assert_resolvable() {
         echo "✗ SERVER_PROFILE=$name but no such profile exists." >&2
         echo "  Looked for servers/{$name,$name.env,server-$name.env}" >&2
         echo "  Available:" >&2
-        ls -1 "$PROJECT_ROOT"/servers/*.env 2>/dev/null | sed 's|.*/|    |' >&2
+        ls -1 "$PROJECT_ROOT"/servers/server-*.env 2>/dev/null \
+        | sed -E 's|.*/server-(.*)\.env|    \1|' >&2
         echo "" >&2
         return 1
     fi

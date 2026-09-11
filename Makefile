@@ -32,7 +32,7 @@ PROFILE_FILE = servers/server-$(PROFILE_NAME).env
 # Which compose profiles to activate, derived from the server profile's
 # ENABLE_* flags. A service the profile did not ask for is never started.
 define enabled_profiles
-$(shell set -a; [ -f "$(PROFILE_FILE)" ] && . "./$(PROFILE_FILE)"; [ -f .env ] && . ./.env; set +a; \
+$(shell set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f"; done; set +a; \
   p=""; \
   [ "$${ENABLE_VLLM:-false}"       = "true" ] && p="$$p --profile vllm"; \
   [ "$${ENABLE_VLLM2:-false}"      = "true" ] && p="$$p --profile vllm2"; \
@@ -89,7 +89,7 @@ setup:
 	  ls -1 servers/server-*.env | sed 's|servers/server-\(.*\)\.env|  \1|'; exit 1; fi; \
 	f="servers/server-$$prof.env"; \
 	[ -f "$$f" ] || { printf "$(RED)No such profile: $$f$(RST)\n"; exit 1; }; \
-	set -a; . "./$$f"; set +a; \
+	set -a; for g in $$(SERVER_PROFILE="$$prof" ./scripts/profile-files.sh 2>/dev/null); do . "$$g"; done; set +a; \
 	printf "\n  detected  $(BOLD)%s$(RST)  $(DIM)(%s)$(RST)\n" "$$prof" "$$f"; \
 	printf "  host      %s / %s\n" "$$(hostname -s)" "$$(hostname -I | awk '{print $$1}')"; \
 	printf "  name      %s\n" "$${SERVER_NAME:-?}"; \
@@ -139,7 +139,7 @@ check: _require_profile
 	docker run --rm --gpus all ubuntu:22.04 true >/dev/null 2>&1 \
 	  && printf "  $(GRN)✓$(RST) nvidia container runtime works\n" \
 	  || printf "  $(YEL)!$(RST) could not run a --gpus container (nvidia-container-toolkit?)\n"; \
-	set -a; . "./$(PROFILE_FILE)"; . ./.env; set +a; \
+	set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f"; done; set +a; \
 	for spec in "$${LITELLM_PORT:-8080}:gateway" "$${VLLM_PORT:-8000}:vllm" \
 	            "$${INFINITY_PORT:-7997}:infinity" "$${OLLAMA_PORT:-11434}:ollama"; do \
 	  port="$${spec%%:*}"; what="$${spec##*:}"; \
@@ -194,7 +194,7 @@ start: _require_profile
 	@printf "\n"; $(MAKE) --no-print-directory urls
 
 models: _require_profile
-	@set -a; . "./$(PROFILE_FILE)"; . ./.env; set +a; \
+	@set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f"; done; set +a; \
 	printf "$(BOLD)Serving$(RST)\n"; \
 	key="$${LITELLM_MASTER_KEY:-sk-1234567890abcdef}"; \
 	port="$${LITELLM_PORT:-8080}"; \
@@ -219,7 +219,7 @@ print(f"  legacy aliases: {len(l)}") if l else None' 2>/dev/null || printf "  (c
 	    "$$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)"; fi
 
 urls: _require_profile
-	@set -a; . "./$(PROFILE_FILE)"; . ./.env; set +a; \
+	@set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f"; done; set +a; \
 	host="$${LITELLM_BIND_ADDR:-0.0.0.0}"; \
 	[ "$$host" = "0.0.0.0" ] && host="$$(hostname -I | awk '{print $$1}')"; \
 	printf "$(BOLD)Endpoints$(RST)\n"; \

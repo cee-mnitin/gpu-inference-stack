@@ -94,10 +94,38 @@ can tell you how. Layering keeps the profile authoritative.
 
 | Profile | Host | GPU | Chat engine | Notes |
 |---|---|---|---|---|
-| `40` | dd4-skynet, 100.117.227.40 | RTX A6000, 48 GB, sm_86 | llama.cpp, Qwen3-Next-80B Q3 | Ampere — none of the Blackwell traps apply |
-| `63` | ddai3, 100.117.227.63 | RTX PRO 4500 Blackwell, 32 GB, sm_120 | vLLM, Qwen3-30B-A3B AWQ | gateway on **8090** — the shared platform holds 8080 |
-| `72` | ddai5, 100.117.227.72 | RTX PRO 4500 Blackwell, 32 GB, sm_120 | vLLM, Qwen3-30B-A3B AWQ | near-copy of `63`; `diff` shows only the host-specific lines |
-| `85` | crimson-llm2, 100.117.227.85 | RTX PRO 6000 Blackwell, 97 GB, sm_120 | vLLM ×2 | the only box with room for **two** chat models |
+| `40` | dd4-skynet, .40 | RTX A6000, 48 GB, sm_86 | llama.cpp, Qwen3-Next-80B Q3 | Ampere — none of the Blackwell traps apply |
+| `61` | ddai1, .61 | RTX PRO 4500 Blackwell, 32 GB | vLLM, Qwen3-30B-A3B AWQ | extends the shared base |
+| `62` | ddai2, .62 | same | same | extends the shared base |
+| `63` | ddai3, .63 | same | same | extends the shared base |
+| `64` | ddai4, .64 | same | same | extends the shared base |
+| `72` | ddai5, .72 | same | same | standalone copy — fold into the base when convenient |
+| `85` | crimson-llm2, .85 | RTX PRO 6000 Blackwell, 97 GB | vLLM | gateway on 8080; engine ports exposed for legacy consumers |
+
+The ddai boxes all serve on **8090** (ddai3 cannot use 8080 — the shared
+platform's traefik holds it there, and the fleet is kept uniform).
+
+### Inheritance
+
+A profile may declare `EXTENDS=<name>` to inherit another file:
+
+```bash
+EXTENDS=common-blackwell-32gb
+SERVER_NAME=ddai1
+```
+
+Load order is **base → profile → .env**, the same last-wins rule compose
+already applies, so a profile overrides what it extends and `.env` overrides
+everything. Chains are followed up to 8 deep and a cycle stops the walk.
+
+`common-blackwell-32gb.env` holds everything ddai1–ddai4 share. It deliberately
+lacks the `server-` prefix, so it never appears as a selectable profile — it is
+not a server. The payoff: `diff servers/server-61.env servers/server-64.env` is
+three lines, and changing the fleet's model is one edit rather than four.
+
+Anything reading a profile must read the whole chain — use
+`scripts/profile-files.sh`, which prints the files in load order. Sourcing the
+selected profile alone yields only `EXTENDS` and `SERVER_NAME`.
 
 The hardware-class files (`server-default.env`, `server-high-vram.env`,
 `server-multi-gpu.env`, `server-a6000-48gb.env`, `server-blackwell-32gb.env`,

@@ -34,12 +34,13 @@ fi
 # shellcheck source=lib-profile.sh
 . "$SCRIPT_DIR/lib-profile.sh"
 
-_PROFILE_FILE="$(profile_path)" || true
-if [ -n "${_PROFILE_FILE:-}" ]; then
+# The WHOLE chain, base first, then .env — not just the selected profile.
+# A profile that inherits holds only EXTENDS and SERVER_NAME, so sourcing it
+# alone would leave every ENABLE_* unset and deploy a box with no services.
+while IFS= read -r _f; do
     # shellcheck disable=SC1090
-    source "$_PROFILE_FILE"
-fi
-source "$PROJECT_ROOT/.env"
+    source "$_f"
+done < <("$SCRIPT_DIR/profile-files.sh")
 
 # A named-but-missing profile must stop the deploy: silently falling through to
 # compose defaults written for a different class of card is how a box ends up
