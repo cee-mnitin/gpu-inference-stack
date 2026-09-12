@@ -253,8 +253,17 @@ services:
   vllm-router:
     image: nginx:1.27-alpine
     container_name: vllm-router-new
+    # NOT in the `vllm` profile any more. It used to start with every vLLM, so
+    # a one-instance box ran an nginx that model-routes 1->1 — a pure extra hop
+    # in front of the engine, plus a container. It is genuinely required only
+    # where there is more than one instance to choose between, or where a
+    # consumer addresses the engine THROUGH it (server-85's qwen3.6-vllm-router
+    # alias reaches host :11500).
+    #
+    # scripts/deploy.sh adds this profile when ENABLE_VLLM_ROUTER is true — the
+    # DEFAULT, so no existing box changes — and forces it on whenever a second
+    # or third vLLM instance is enabled, since routing is not optional then.
     profiles:
-      - vllm
       - vllm-router
     restart: unless-stopped
     ports:

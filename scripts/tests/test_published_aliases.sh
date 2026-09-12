@@ -124,6 +124,23 @@ else
         "$(printf '   %s\n' $missing_unserved)"
 fi
 
+# ── 6. The router flag and the router alias must agree ─────────────────────
+# vllm-router is an nginx hop that model-routes across up to three vLLM
+# instances. On a one-instance box it routes 1->1 and buys nothing, so a
+# profile may turn it off — but LEGACY_VLLM_ROUTER_ALIAS points THROUGH it, so
+# turning it off while still publishing that alias recreates the very defect
+# this file exists to prevent, one layer down.
+for prof in "$REPO_ROOT"/servers/*.env; do
+    grep -qE '^ENABLE_VLLM_ROUTER=false' "$prof" || continue
+    name="$(basename "$prof")"
+    if grep -qE '^LEGACY_VLLM_ROUTER_ALIAS=unserved/' "$prof"; then
+        ok "$name: router off, and its alias is unserved"
+    else
+        bad "$name: ENABLE_VLLM_ROUTER=false but LEGACY_VLLM_ROUTER_ALIAS is still consumable" \
+            "    add: LEGACY_VLLM_ROUTER_ALIAS=unserved/qwen3.6-new-router"
+    fi
+done
+
 echo ""
 printf '  %d passed, %d failed\n\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

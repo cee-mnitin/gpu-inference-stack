@@ -172,6 +172,27 @@ for _n in 2 3; do
     fi
 done
 
+# vllm-router. Default ON, so every box that had it keeps it. Off is for a box
+# with ONE instance and no consumer addressing the engine through the router:
+# there it is an extra hop and a container for nothing. Multi-instance forces it
+# back on regardless of the flag — with two models behind one port, the router
+# IS the thing that picks between them, and running without it would route every
+# request to instance 1.
+if [ "${ENABLE_VLLM}" = "true" ]; then
+    _router="${ENABLE_VLLM_ROUTER:-true}"
+    if [ "${ENABLE_VLLM2:-false}" = "true" ] || [ "${ENABLE_VLLM3:-false}" = "true" ]; then
+        if [ "$_router" != "true" ]; then
+            echo "Enabling vLLM router (forced: more than one vLLM instance)..."
+        fi
+        _router=true
+    fi
+    if [ "$_router" = "true" ]; then
+        PROFILES="$PROFILES,vllm-router"
+    else
+        echo "vLLM router disabled (single instance, ENABLE_VLLM_ROUTER=false)."
+    fi
+fi
+
 # llama.cpp — the alternative chat engine. Exclusivity with vLLM was already
 # enforced above, so at most one of these two branches can be taken.
 if [ "${ENABLE_LLAMACPP}" = "true" ]; then
