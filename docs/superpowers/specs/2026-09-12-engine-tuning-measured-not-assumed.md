@@ -118,3 +118,87 @@ No engine restart was needed for any of this: the removed flag was inert, and
 the other two are unchanged. `scripts/chain-bench.sh --label <name>` records
 the preemption and prefix-cache counters that back the two "leave it alone"
 decisions, so a future change that invalidates them shows up in a comparison.
+
+---
+
+# Addendum, same day: two of the claims above are wrong, and one cause explains both
+
+**Status:** corrected 2026-09-12, after an actual engine restart
+**Touches:** this document, `servers/server-multi-gpu.env`, `servers/server-high-vram.env`
+
+The section above ends "No engine restart was needed for any of this: the
+removed flag was inert, and the other two are unchanged." That sentence is the
+root cause of the two errors below. Every reading behind §1 and its
+prefix-caching note came from a vLLM log emitted at **04:52**, and
+`--block-size 128` was removed from the profile at **12:32**. The engine was
+never restarted in between, so the log describing the *old* configuration was
+read as evidence about the *new* one.
+
+Restarted at 18:40 while measuring the prefix-caching question §1 left open.
+
+## `--block-size 128` was NOT inert. It was doing exactly what it says.
+
+| boot | `--block-size` | prefix caching | attention block | KV cache |
+|---|---|---|---:|---:|
+| 04:52 | 128 | on | **2176** | 204,055 tok |
+| 18:40 | absent | off | **2096** | 217,460 tok |
+| 18:50 | absent | on | **2096** | 211,502 tok |
+
+The flag raised the block from 2096 to 2176. vLLM's clamp — "block size must be
+at least the mamba page size" — is a **floor**, not a fixed value, so a larger
+requested block survives it and a smaller one is raised to it. §1 read the
+clamp as collapsing both inputs to one number; it collapses only inputs *below*
+the floor.
+
+So removing it was a small real improvement rather than a no-op: ~3.7% finer
+pages and ~3.6% more KV tokens at the same `gpu-memory-utilization`. The
+conclusion in §1 was right by accident, and its reasoning was wrong.
+
+## Prefix caching does not set the block size
+
+§1 asserts "enabling prefix caching is what makes the block this large... on a
+workload whose prefixes are all under 2176 tokens it is therefore not free — it
+buys nothing and coarsens allocation." Rows two and three refute that: **2096
+either way.** The block is model geometry, not a consequence of the flag, and
+there is no allocation penalty to weigh.
+
+## And it costs nothing measurable, so it stays on without the caveat
+
+`scripts/chain-bench.sh --compare pfx-on pfx-off`, the two cells that describe
+ember's real workload:
+
+```
+graph in_flight=8  chunks_per_min    73.9  ->   71.9
+graph in_flight=16 chunks_per_min   107.7  ->  108.4
+graph in_flight=32 chunks_per_min   146.9  ->  147.5     <- the production setting
+graph in_flight=48 chunks_per_min   147.8  ->  148.8
+conc=32 agg_tok_s                  1843.0  -> 1761.6
+conc=64 agg_tok_s                  1504.5  -> 1611.0
+preemptions                             0  ->        0
+```
+
+Every row is inside run-to-run noise, in both directions. The 6.6% of extra KV
+that turning it off buys changes nothing, for the same reason §2 gave for
+declining the utilisation offer: **nothing on this box is KV-constrained**, and
+zero preemptions in either column says so again.
+
+Prefix caching stays **on**, now on stronger grounds than §1's "the cost is
+small": there is no measured cost at all, and a workload with prefixes longer
+than ~2.1k tokens would benefit the moment one appears.
+
+## Two profiles set a variable that does not exist
+
+`servers/server-multi-gpu.env` and `servers/server-high-vram.env` set
+`VLLM_ENABLE_PREFIX_CACHING=true`. Nothing reads it — `docker-compose.yml`
+reads `VLLM_PREFIX_CACHING`, and `.env.example` records that the old
+`*_FLAG`-style names were replaced. The setting was inert, and harmless only
+because the value it meant to assert is already the default. Corrected to the
+real name, which is the kind of thing that matters the day someone tries to
+turn it *off* on one of those boxes and nothing happens.
+
+## The lesson, which is the same one §1 was written to teach
+
+Measure, but measure the thing you changed. A log is evidence about the process
+that emitted it, and an engine that has not been restarted is still running the
+old configuration however recently the file was edited. Both errors here would
+have been caught by one `docker restart` before reading.
