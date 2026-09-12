@@ -26,6 +26,10 @@
 #                        2176-token attention block, which nothing else shows
 #   hop overhead         engine vs stack gateway vs consumer gateway, so a
 #                        regression is attributed to a tier
+#   role isolation       what a latency-tier call costs while the bulk tier
+#                        saturates the engine. Every other cell drives one role
+#                        at a time, so none of them can see the contention that
+#                        all three chat roles sharing one vLLM actually creates
 #
 # Usage:
 #   scripts/chain-bench.sh --label before
@@ -33,7 +37,7 @@
 #   scripts/chain-bench.sh --label after
 #   scripts/chain-bench.sh --compare before after
 #
-#   --only extraction,concurrency,graph,embed,hops   run a subset
+#   --only extraction,concurrency,graph,embed,hops,isolation   run a subset
 #   --trials N          samples per extraction cell (default 20)
 #   --consumer URL      also measure through a consumer gateway (ember's)
 #   --consumer-key KEY
@@ -56,7 +60,7 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 . "$SCRIPT_DIR/lib-profile.sh"
 profile_load_vars
 
-LABEL=""; COMPARE_A=""; COMPARE_B=""; ONLY="extraction,concurrency,graph,embed,hops"
+LABEL=""; COMPARE_A=""; COMPARE_B=""; ONLY="extraction,concurrency,graph,embed,hops,isolation"
 TRIALS=20; OUT_DIR="$PROJECT_ROOT/data/chain-bench"
 CONSUMER_URL="${CONSUMER_URL:-}"; CONSUMER_KEY="${CONSUMER_KEY:-}"
 

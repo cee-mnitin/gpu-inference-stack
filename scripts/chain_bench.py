@@ -202,6 +202,78 @@ def concurrency(model, n, out_tokens=256):
             "errors": len(errs)}
 
 
+def role_isolation(bulk_in_flight=32, samples=12, warm_s=15):
+    """What a latency-tier call costs while the bulk tier saturates the engine.
+
+    The contract names interactive, bulk and fast as separately PLACEABLE roles.
+    Most boxes, including every one in this fleet, serve all three from ONE
+    vLLM with first-come scheduling — so bulk extraction and a user-facing turn
+    compete, and nothing in the other cells of this benchmark would show it:
+    each of them drives a single role at a time.
+
+    Measures gpu/chat/fast idle, then again under `bulk_in_flight` concurrent
+    ~1200-token extraction calls.
+
+    READ p95, NOT p50. Two runs on ddai4 2026-09-12, same configuration:
+
+        idle            p50 0.057-0.058   p95 0.061-0.062
+        under 32 bulk   p50 0.099-0.306   p95 0.466-0.605
+
+    The p50 ratio moved between 1.7x and 5.4x across those runs while p95 barely
+    shifted — a latency-tier call lands either in the gap between bulk decode
+    batches or behind one, so the median is sensitive to where the sample falls
+    in that cycle and the tail is not. Quoting the p50 ratio as a stable figure
+    would invite chasing noise.
+
+    Contention is therefore real and bounded: the tail roughly decuples, to ~0.6s,
+    with zero errors — still ~50x inside the 30s budget ember's gpu_fast profile
+    allows. That headroom is why all three roles were left on one engine rather
+    than split across boxes, which is what the contract's separate names exist to
+    make possible. This cell is the saved number that would say when that stops
+    being true.
+    """
+    def sample():
+        lat = []
+        for _ in range(samples):
+            _d, dt = post(STACK_URL, STACK_KEY, "/v1/chat/completions", {
+                "model": "gpu/chat/fast", "max_tokens": 16, "temperature": 0.2,
+                "messages": [{"role": "user", "content":
+                              "Reply with one word: is 'vessel' a noun? yes or no."}]})
+            lat.append(dt)
+        return {"p50_s": round(statistics.median(lat), 3),
+                "p95_s": round(pct(lat, 95), 3),
+                "max_s": round(max(lat), 3)}
+
+    idle = sample()
+
+    stop = threading.Event()
+    load_done, load_err = [], []
+
+    def loop():
+        while not stop.is_set():
+            try:
+                _d, dt = post(STACK_URL, STACK_KEY, "/v1/chat/completions", {
+                    "model": "gpu/chat/bulk", "max_tokens": 256, "temperature": 0.2,
+                    "messages": [{"role": "user", "content": ARTICLE * 14 + "\nExtract every "
+                                  "organisation and vessel as JSON with keys 'orgs' and 'vessels'."}]})
+                load_done.append(dt)
+            except Exception as exc:  # noqa: BLE001 — a failed call is a datum
+                load_err.append(repr(exc)[:120])
+
+    threads = [threading.Thread(target=loop, daemon=True) for _ in range(bulk_in_flight)]
+    for t in threads:
+        t.start()
+    time.sleep(warm_s)          # let the queue reach steady state before sampling
+    under = sample()
+    stop.set()
+    for t in threads:
+        t.join(timeout=120)
+
+    ratio = round(under["p50_s"] / idle["p50_s"], 2) if idle["p50_s"] else None
+    return {"bulk_in_flight": bulk_in_flight, "fast_idle": idle, "fast_under_bulk": under,
+            "p50_ratio": ratio, "bulk_completed": len(load_done), "bulk_errors": len(load_err)}
+
+
 def graph_load(model, in_flight, chunks=96):
     """The shape ember's graph stage issues: many ~1200-token chunks -> KG JSON.
 
@@ -330,6 +402,9 @@ def run(label):
     if "concurrency" in ONLY:
         print("  concurrency sweep ...", flush=True)
         result["concurrency"] = [concurrency("gpu/chat/bulk", n) for n in (1, 8, 16, 32, 64)]
+    if "isolation" in ONLY:
+        print("  role isolation (fast under bulk saturation)...", file=sys.stderr)
+        result["role_isolation"] = role_isolation()
     if "graph" in ONLY:
         print("  graph-shaped load ...", flush=True)
         result["graph_load"] = [graph_load("gpu/chat/bulk", n) for n in (8, 16, 24, 32, 48)]
@@ -370,6 +445,13 @@ def _flatten(result):
     for cell in result.get("graph_load", []):
         flat["graph in_flight=%s chunks_per_min" % cell["in_flight"]] = cell.get("chunks_per_min")
         flat["graph in_flight=%s p95_lat_s" % cell["in_flight"]] = cell.get("p95_lat_s")
+    cell = result.get("role_isolation")
+    if cell:
+        flat["isolation fast idle p50_s"] = cell["fast_idle"]["p50_s"]
+        flat["isolation fast under bulk p50_s"] = cell["fast_under_bulk"]["p50_s"]
+        flat["isolation fast under bulk p95_s"] = cell["fast_under_bulk"]["p95_s"]
+        flat["isolation p50 ratio"] = cell["p50_ratio"]
+        flat["isolation bulk errors"] = cell["bulk_errors"]
     for k, v in (result.get("hop_overhead_ms") or {}).items():
         flat["hop %s" % k] = v
     for k, v in (result.get("embed_rerank") or {}).items():
