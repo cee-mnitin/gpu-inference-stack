@@ -323,6 +323,48 @@ if [ "${CONTRACT_PROBE:-1}" = "1" ] && [ -n "$_served" ]; then
     _probe_call gpu/chat/vision /v1/chat/completions \
       "{\"model\":\"gpu/chat/vision\",\"max_tokens\":2048,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"describe\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,$_px\"}}]}]}"
 
+    # ── Anything published OUTSIDE the contract ────────────────────────────
+    # The contract probe above covers the six names a consumer is promised. It
+    # says nothing about the rest of /v1/models, and on 2026-09-12 that was
+    # where the problem lived: ddai4 published thirteen legacy aliases and
+    # every one returned HTTP 500 or 404. config.yaml's own argument — that a
+    # published-but-dead alias is worse than an absent one, because a consumer
+    # routes around a missing name and breaks on a dead one — applies to every
+    # name the gateway lists, not only to the six it calls a contract.
+    #
+    # Names under `unserved/` are SKIPPED, not probed: that prefix is how a box
+    # says "this deployment exists for debugging and is not for consumption",
+    # so a failure there is the configuration working, not breaking.
+    #
+    # A dead legacy alias is a WARNING, not a failure. It breaks no contract,
+    # and a box mid-migration may legitimately carry one. It must simply never
+    # again be invisible.
+    _legacy_dead=""
+    _legacy_live=0
+    for _a in $(echo "$_served" | grep -vE '^(gpu/|unserved/)' || true); do
+        _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+            -X POST "${LITELLM_BASE}/v1/chat/completions" \
+            -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"model\":\"$_a\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":4}" 2>/dev/null)"
+        # An embedding/rerank deployment answers 400 to a chat body — that is a
+        # live backend refusing the wrong call shape, not a dead alias. Only a
+        # 5xx or a 404 (no such model / no route) means nothing is behind it.
+        case "$_code" in
+            5*|404|000) _legacy_dead="$_legacy_dead $_a" ;;
+            *) _legacy_live=$((_legacy_live+1)) ;;
+        esac
+    done
+    if [ -n "$_legacy_dead" ]; then
+        echo ""
+        echo -e "  ${YELLOW}Published outside the contract and NOT answering:${NC}"
+        for _a in $_legacy_dead; do echo -e "    ${YELLOW}!${NC} $_a"; done
+        echo -e "  ${DIM}  Give each an unserved/ name in this box's server profile, or point it${NC}"
+        echo -e "  ${DIM}  at a backend that exists. See the LEGACY_* block in docker-compose.yml.${NC}"
+    elif [ "$_legacy_live" -gt 0 ]; then
+        echo -e "  ${GREEN}✓${NC} $_legacy_live non-contract alias(es) published, all answering"
+    fi
+
     if [ "$_probe_failed" = "1" ]; then
         echo -e "  ${RED}One or more aliases resolve but do not serve.${NC}"
         echo -e "  ${YELLOW}Do not point a consumer at this box until they pass:${NC}"

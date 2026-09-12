@@ -253,13 +253,44 @@ model_list:
   # ==========================================================================
   # INTERNAL TOPOLOGY BELOW — not part of any consumer contract
   # ==========================================================================
+  # THIRTEEN LEGACY ALIASES, EVERY ONE SWITCHABLE. Read the CONTRACT_VISION_ALIAS
+  # comment above first: it argues that an alias which is published but does not
+  # answer is strictly WORSE than an absent one, because a consumer routes
+  # AROUND a missing name and breaks on a dead one. That argument applies here
+  # too, and until 2026-09-12 this block ignored it — all thirteen names were
+  # literals, so a box could not turn off the ones it had no backend for.
+  #
+  # Audited on ddai4 that day: of the nineteen aliases the box published,
+  # THIRTEEN returned HTTP 500 or 404. The five `qwen3.6-*` entries asked for a
+  # served model named `qwen3.6` while the engine serves `qwen3.6-35b-a3b`; the
+  # six Ollama entries pointed at an Ollama that `ENABLE_OLLAMA=false` never
+  # starts; the two `*-native` entries pointed at a TEI pair that exists only on
+  # server-85.
+  #
+  # DELETING THEM WOULD BE WRONG. They are load-bearing on server-85, whose
+  # profile pins VLLM_PORT, VLLM_ROUTER_PORT, OLLAMA_PORT and VLLM_MODEL_NAME
+  # specifically to keep them resolving — "260 of the last 290 gateway requests
+  # were openai/qwen3.6". So they get the same treatment the optional contract
+  # roles already have: an env-driven name with a historical default, which a
+  # box that cannot serve one moves to the `unserved/` namespace.
+  #
+  # Defaults are the historical names, so server-85 is unchanged by this.
+  # scripts/tests/test_published_aliases.sh is what keeps the next alias from
+  # being added as a literal.
+  #
+  # The served MODEL name is env-driven for the same reason and is the other
+  # half of the bug: `openai/qwen3.6` was correct on server-85 and wrong on
+  # every Blackwell box. LEGACY_VLLM_MODEL defaults to openai/${VLLM_MODEL_NAME},
+  # so each box asks its own engine for the name that engine actually serves.
+
   # ============================================================================
-  # NEW VLLM MODELS (from gpu-inference-stack - PHASE 2 PRODUCTION)
-  # Running on production ports, integrated in Docker network
+  # VLLM VIA THIS STACK'S OWN COMPOSE NETWORK
+  # Served wherever ENABLE_VLLM is on — the engine is reached by service name,
+  # so these need no host port and stay live on every box.
   # ============================================================================
-  - model_name: qwen3.6-new-router
+  - model_name: os.environ/LEGACY_VLLM_ROUTER_ALIAS
     litellm_params:
-      model: openai/qwen3.6
+      model: os.environ/LEGACY_VLLM_MODEL
       api_base: http://vllm-router-new:8080/v1
       api_key: "EMPTY"
       timeout: 600
@@ -270,9 +301,24 @@ model_list:
       supports_parallel_function_calling: true
       supports_reasoning: true
 
-  - model_name: qwen3.6-new-direct
+  - model_name: os.environ/LEGACY_VLLM_DIRECT_ALIAS
     litellm_params:
-      model: openai/qwen3.6
+      model: os.environ/LEGACY_VLLM_MODEL
+      api_base: http://vllm-new:8000/v1
+      api_key: "EMPTY"
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+      supports_parallel_function_calling: true
+      supports_reasoning: true
+
+  # Third name for the same compose-network engine as LEGACY_VLLM_DIRECT_ALIAS
+  # above. Kept because consumers address it by name; it is not a second route.
+  - model_name: os.environ/LEGACY_VLLM_DOCKER_ALIAS
+    litellm_params:
+      model: os.environ/LEGACY_VLLM_MODEL
       api_base: http://vllm-new:8000/v1
       api_key: "EMPTY"
       timeout: 600
@@ -284,94 +330,13 @@ model_list:
       supports_reasoning: true
 
   # ============================================================================
-  # DOCKERIZED OLLAMA MODELS (from this stack)
+  # VLLM VIA HOST PORTS  (server-85: router :11500, direct :11502)
+  # These reach the engine through host.docker.internal, so they are live only
+  # on a box that publishes those host ports. Unserved elsewhere.
   # ============================================================================
-  - model_name: qwen2.5-7b-ollama-docker
+  - model_name: os.environ/LEGACY_VLLM_ROUTER_HOST_ALIAS
     litellm_params:
-      model: ollama/qwen2.5:7b
-      api_base: http://ollama:11434
-      timeout: 600
-    model_info:
-      mode: chat
-      supports_function_calling: true
-      supports_vision: false
-
-  - model_name: gemma3-12b-ollama-docker
-    litellm_params:
-      model: ollama/gemma3:12b
-      api_base: http://ollama:11434
-      timeout: 600
-    model_info:
-      mode: chat
-      supports_function_calling: true
-      supports_vision: false
-
-  # ============================================================================
-  # NATIVE OLLAMA MODELS (existing server installation)
-  # ============================================================================
-  - model_name: qwen2.5-7b-ollama-native
-    litellm_params:
-      model: ollama/qwen2.5:7b
-      api_base: http://host.docker.internal:11437
-      timeout: 600
-    model_info:
-      mode: chat
-      supports_function_calling: true
-      supports_vision: false
-
-  - model_name: qwen3.6-ollama-native
-    litellm_params:
-      model: ollama/qwen3.6:latest
-      api_base: http://host.docker.internal:11437
-      timeout: 600
-    model_info:
-      mode: chat
-      supports_function_calling: true
-      supports_vision: false
-
-  - model_name: gemma3-12b-ollama-native
-    litellm_params:
-      model: ollama/gemma3:12b
-      api_base: http://host.docker.internal:11437
-      timeout: 600
-    model_info:
-      mode: chat
-      supports_function_calling: true
-      supports_vision: false
-
-  - model_name: granite3.3-8b-ollama-native
-    litellm_params:
-      model: ollama/granite3.3:8b
-      api_base: http://host.docker.internal:11437
-      timeout: 600
-    model_info:
-      mode: chat
-      supports_function_calling: true
-      supports_vision: false
-
-  # ============================================================================
-  # DOCKERIZED VLLM MODELS (from this stack)
-  # ============================================================================
-  - model_name: qwen3.6-vllm-docker
-    litellm_params:
-      model: openai/qwen3.6
-      api_base: http://vllm-new:8000/v1
-      api_key: "EMPTY"
-      timeout: 600
-    model_info:
-      mode: chat
-      supports_function_calling: true
-      supports_vision: false
-      supports_parallel_function_calling: true
-      supports_reasoning: true
-
-  # ============================================================================
-  # EXISTING VLLM INFRASTRUCTURE (Docker containers with router)
-  # ============================================================================
-  # Router provides model-aware routing to vLLM backends
-  - model_name: qwen3.6-vllm-router
-    litellm_params:
-      model: openai/qwen3.6
+      model: os.environ/LEGACY_VLLM_MODEL
       api_base: http://host.docker.internal:11500/v1
       api_key: "EMPTY"
       timeout: 600
@@ -381,10 +346,9 @@ model_list:
       supports_vision: false
       supports_parallel_function_calling: true
 
-  # Direct access to vLLM container (bypass router)
-  - model_name: qwen3.6-vllm-direct
+  - model_name: os.environ/LEGACY_VLLM_DIRECT_HOST_ALIAS
     litellm_params:
-      model: openai/qwen3.6
+      model: os.environ/LEGACY_VLLM_MODEL
       api_base: http://host.docker.internal:11502/v1
       api_key: "EMPTY"
       timeout: 600
@@ -395,9 +359,77 @@ model_list:
       supports_parallel_function_calling: true
 
   # ============================================================================
-  # EMBEDDINGS (native TEI services - OpenAI compatible)
+  # DOCKERIZED OLLAMA  —  live only where ENABLE_OLLAMA=true
   # ============================================================================
-  - model_name: bge-m3-native
+  - model_name: os.environ/LEGACY_OLLAMA_QWEN25_7B_DOCKER_ALIAS
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://ollama:11434
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: os.environ/LEGACY_OLLAMA_GEMMA3_12B_DOCKER_ALIAS
+    litellm_params:
+      model: ollama/gemma3:12b
+      api_base: http://ollama:11434
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  # ============================================================================
+  # NATIVE OLLAMA  —  a host install, not this stack's container (server-85
+  # pins OLLAMA_PORT=11437 to keep these four resolving)
+  # ============================================================================
+  - model_name: os.environ/LEGACY_OLLAMA_QWEN25_7B_NATIVE_ALIAS
+    litellm_params:
+      model: ollama/qwen2.5:7b
+      api_base: http://host.docker.internal:11437
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: os.environ/LEGACY_OLLAMA_QWEN36_NATIVE_ALIAS
+    litellm_params:
+      model: ollama/qwen3.6:latest
+      api_base: http://host.docker.internal:11437
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: os.environ/LEGACY_OLLAMA_GEMMA3_12B_NATIVE_ALIAS
+    litellm_params:
+      model: ollama/gemma3:12b
+      api_base: http://host.docker.internal:11437
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  - model_name: os.environ/LEGACY_OLLAMA_GRANITE33_8B_NATIVE_ALIAS
+    litellm_params:
+      model: ollama/granite3.3:8b
+      api_base: http://host.docker.internal:11437
+      timeout: 600
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+
+  # ============================================================================
+  # NATIVE TEI EMBED + RERANK  —  cruxint's workers on server-85 (:8081/:8082).
+  # NOT this stack's Infinity; the contract's embed/rerank roles are separate.
+  # ============================================================================
+  - model_name: os.environ/LEGACY_EMBED_NATIVE_ALIAS
     litellm_params:
       model: openai/BAAI/bge-m3
       api_base: http://host.docker.internal:8081/v1
@@ -407,10 +439,7 @@ model_list:
       input_cost_per_token: 0.0
       output_cost_per_token: 0.0
 
-  # ============================================================================
-  # RERANKER (native TEI services)
-  # ============================================================================
-  - model_name: bge-reranker-v2-m3-native
+  - model_name: os.environ/LEGACY_RERANK_NATIVE_ALIAS
     litellm_params:
       model: huggingface/BAAI/bge-reranker-v2-m3
       api_base: http://host.docker.internal:8082

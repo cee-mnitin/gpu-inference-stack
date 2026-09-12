@@ -779,6 +779,37 @@ services:
       - CONTRACT_EMBED_API_BASE=${CONTRACT_EMBED_API_BASE:-http://infinity:7997}
       - CONTRACT_RERANK_API_BASE=${CONTRACT_RERANK_API_BASE:-http://infinity:7997}
       - CONTRACT_OCR_API_BASE=${CONTRACT_OCR_API_BASE:-http://vllm:8000/v1}
+      # ── LEGACY ALIASES — the thirteen names outside the gpu/ contract ──────
+      # Every one is env-driven so a box can turn off the ones it has no
+      # backend for. Until 2026-09-12 they were literals in config.yaml, and
+      # ddai4 published thirteen aliases that all returned HTTP 500/404 —
+      # exactly the published-but-dead state the contract block argues against.
+      #
+      # The defaults below are the HISTORICAL names, so a box that sets none of
+      # these (server-85, where these aliases carry real traffic) is unchanged.
+      # A box that cannot serve one sets it to `unserved/<something>` in its
+      # server profile, which publishes the deployment outside the consumable
+      # namespace — introspectable for debugging, invisible to a consumer.
+      #
+      # LEGACY_VLLM_MODEL is the other half of the fix: the five qwen3.6-*
+      # entries hardcoded `openai/qwen3.6`, which is what server-85's engine
+      # serves and NOT what any Blackwell box serves. Deriving it from
+      # VLLM_MODEL_NAME means each box asks its own engine for the name that
+      # engine actually answers to.
+      - LEGACY_VLLM_MODEL=${LEGACY_VLLM_MODEL:-openai/${VLLM_MODEL_NAME:-qwen3.6}}
+      - LEGACY_VLLM_ROUTER_ALIAS=${LEGACY_VLLM_ROUTER_ALIAS:-qwen3.6-new-router}
+      - LEGACY_VLLM_DIRECT_ALIAS=${LEGACY_VLLM_DIRECT_ALIAS:-qwen3.6-new-direct}
+      - LEGACY_VLLM_DOCKER_ALIAS=${LEGACY_VLLM_DOCKER_ALIAS:-qwen3.6-vllm-docker}
+      - LEGACY_VLLM_ROUTER_HOST_ALIAS=${LEGACY_VLLM_ROUTER_HOST_ALIAS:-qwen3.6-vllm-router}
+      - LEGACY_VLLM_DIRECT_HOST_ALIAS=${LEGACY_VLLM_DIRECT_HOST_ALIAS:-qwen3.6-vllm-direct}
+      - LEGACY_OLLAMA_QWEN25_7B_DOCKER_ALIAS=${LEGACY_OLLAMA_QWEN25_7B_DOCKER_ALIAS:-qwen2.5-7b-ollama-docker}
+      - LEGACY_OLLAMA_GEMMA3_12B_DOCKER_ALIAS=${LEGACY_OLLAMA_GEMMA3_12B_DOCKER_ALIAS:-gemma3-12b-ollama-docker}
+      - LEGACY_OLLAMA_QWEN25_7B_NATIVE_ALIAS=${LEGACY_OLLAMA_QWEN25_7B_NATIVE_ALIAS:-qwen2.5-7b-ollama-native}
+      - LEGACY_OLLAMA_QWEN36_NATIVE_ALIAS=${LEGACY_OLLAMA_QWEN36_NATIVE_ALIAS:-qwen3.6-ollama-native}
+      - LEGACY_OLLAMA_GEMMA3_12B_NATIVE_ALIAS=${LEGACY_OLLAMA_GEMMA3_12B_NATIVE_ALIAS:-gemma3-12b-ollama-native}
+      - LEGACY_OLLAMA_GRANITE33_8B_NATIVE_ALIAS=${LEGACY_OLLAMA_GRANITE33_8B_NATIVE_ALIAS:-granite3.3-8b-ollama-native}
+      - LEGACY_EMBED_NATIVE_ALIAS=${LEGACY_EMBED_NATIVE_ALIAS:-bge-m3-native}
+      - LEGACY_RERANK_NATIVE_ALIAS=${LEGACY_RERANK_NATIVE_ALIAS:-bge-reranker-v2-m3-native}
     # NO --detailed_debug by default. Measured on ddai3 2026-09-12: with it on,
     # embeddings through the gateway ran at 49/s against the engine's ~1000/s —
     # a 10x tax paid on EVERY request, because the flag logs the full request
