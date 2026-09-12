@@ -79,6 +79,21 @@ if [ -z "$LABEL" ] && [ -z "$COMPARE_A" ]; then
     exit 2
 fi
 
+# A consumer URL with no key is refused here rather than measured. LiteLLM
+# answers an empty bearer with 401 "Malformed API Key", which this harness would
+# faithfully record as `error: HTTP 401` in the result — a number-shaped
+# non-answer that survives into a --compare table and reads like the consumer
+# tier is broken. Caught the honest way: `EK=... ./chain-bench.sh --consumer-key
+# "$EK"` expands $EK in the PARENT shell, before the assignment applies, so the
+# key arrives empty and everything downstream looks like an auth outage.
+if [ -n "$CONSUMER_URL" ] && [ -z "$CONSUMER_KEY" ]; then
+    echo "chain-bench: --consumer given without --consumer-key (or CONSUMER_KEY)." >&2
+    echo "  A gateway key is not optional; an empty one measures a 401, not a tier." >&2
+    echo "  Note that 'VAR=x ./chain-bench.sh --consumer-key \"\$VAR\"' does NOT work" >&2
+    echo "  — the parent shell expands \$VAR before the assignment. Export it first." >&2
+    exit 2
+fi
+
 _host="${LITELLM_BIND_ADDR:-localhost}"
 case "$_host" in ""|0.0.0.0|"[::]"|"::") _host="localhost" ;; esac
 STACK_URL="http://${_host}:${LITELLM_PORT:-8080}"
