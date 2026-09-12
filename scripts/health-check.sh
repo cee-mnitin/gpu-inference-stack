@@ -9,10 +9,23 @@ NC='\033[0m'
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
-# Load environment
-if [ -f "$PROJECT_ROOT/.env" ]; then
-    source "$PROJECT_ROOT/.env"
-fi
+# Load environment.
+#
+# The PROFILE CHAIN, not .env alone. Ports, the bind address and which engines
+# are enabled all live in servers/server-<name>.env — .env carries only
+# SERVER_PROFILE and the secrets. Sourcing .env by itself left every one of
+# those at a compose default written for a different class of box: on ddai4
+# this probed LiteLLM at :8080, which platform-traefik holds, and reported
+# "✗ FAILED (HTTP 404)" from that unrelated proxy while LiteLLM was healthy on
+# :8090 — the very failure the LITELLM_BIND_ADDR note below describes, with the
+# host half fixed and the port half missed. Prometheus and Grafana were wrong
+# the same way.
+#
+# profile_load_vars parses rather than sources (INFINITY_CMD is a quoted
+# multi-word command) and leaves anything the caller already exported alone.
+# shellcheck source=lib-profile.sh
+. "$SCRIPT_DIR/lib-profile.sh"
+profile_load_vars
 
 # ---------------------------------------------------------------------------
 # Where is LiteLLM actually listening?

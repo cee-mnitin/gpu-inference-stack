@@ -108,6 +108,90 @@ profile_env_file_args() {
     [ -f "$PROJECT_ROOT/.env" ] && printf -- '--env-file %s ' "$PROJECT_ROOT/.env"
 }
 
+# Export every KEY=VALUE of the resolved chain (base -> profile -> .env) into
+# the CURRENT shell, for the scripts that need the values but never invoke
+# compose. `profile_env_file_args` is enough for anything that shells out to
+# `docker compose`, because compose does this layering itself; health-check.sh
+# does not, and sourcing .env alone left it reading compose defaults written
+# for a different class of box. On ddai4 that aimed the LiteLLM probe at :8080
+# — which platform-traefik holds — so the check reported a 404 from an
+# unrelated proxy while LiteLLM was healthy on :8090. Exactly the failure the
+# LITELLM_BIND_ADDR comment in health-check.sh describes; the host half was
+# fixed and the port half was not.
+#
+# PARSED, NOT SOURCED, for the reason profile_env_get already gives: these
+# files legitimately hold values with spaces and shell metacharacters
+# (INFINITY_CMD is a quoted multi-word command), and sourcing one has already
+# aborted a deploy with `--model-id: command not found`.
+#
+# A variable the CALLER already exported is never overwritten — running
+# `LITELLM_PORT=9999 ./scripts/health-check.sh` is a deliberate override, and
+# it has to beat a committed file. Within the chain the later file wins, the
+# same last-wins rule compose applies.
+profile_load_vars() {
+    local name f key val
+    name="${SERVER_PROFILE:-$(profile_env_get SERVER_PROFILE)}"
+
+    local files=()
+    if [ -n "$name" ]; then
+        # profile_chain lists derived-first; base must be applied first.
+        while IFS= read -r f; do
+            [ -n "$f" ] && files=("$f" "${files[@]}")
+        done < <(profile_chain "$name")
+    fi
+    [ -f "$PROJECT_ROOT/.env" ] && files+=("$PROJECT_ROOT/.env")
+    [ "${#files[@]}" -gt 0 ] || return 0
+
+    # Keys the CALLER already has set, recorded BEFORE anything is exported —
+    # otherwise the first file to mention a key would make it look preset to
+    # the second, and the chain's last-wins rule would never fire.
+    local locked=" "
+    for f in "${files[@]}"; do
+        while IFS='=' read -r key val; do
+            [ -n "$key" ] || continue
+            [ -n "${!key+x}" ] && case "$locked" in *" $key "*) ;; *) locked="$locked$key " ;; esac
+        done < <(_profile_kv_lines "$f")
+    done
+
+    for f in "${files[@]}"; do
+        while IFS='=' read -r key val; do
+            [ -n "$key" ] || continue
+            case "$locked" in *" $key "*) continue ;; esac
+            export "$key=$val"
+        done < <(_profile_kv_lines "$f")
+    done
+}
+
+# Emit `KEY=VALUE` for each assignment in an env file, applying the same rules
+# compose does: comment and blank lines dropped, surrounding quotes stripped,
+# and an inline ` # …` comment removed only from an UNQUOTED value (the
+# profiles use both — `ENABLE_EMBEDDINGS=false  # no TEI tag for sm_120` and
+# `INFINITY_CMD="v2 --model-id BAAI/bge-m3 --port 7997"`).
+_profile_kv_lines() {
+    awk '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        {
+            eq = index($0, "=")
+            if (eq == 0) next
+            key = substr($0, 1, eq - 1)
+            val = substr($0, eq + 1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            if (key !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
+            sub(/^[[:space:]]+/, "", val)
+            q = substr(val, 1, 1)
+            if ((q == "\"" || q == "'"'"'")) {
+                close_at = index(substr(val, 2), q)
+                if (close_at > 0) val = substr(val, 2, close_at - 1)
+                else val = substr(val, 2)
+            } else {
+                sub(/[[:space:]]+#.*$/, "", val)
+                sub(/[[:space:]]+$/, "", val)
+            }
+            print key "=" val
+        }
+    ' "$1" 2>/dev/null
+}
+
 # Warn once, loudly, when SERVER_PROFILE names a file that does not exist.
 # Silence here would mean every profile value quietly falling back to a compose
 # default that was written for a different class of card.
