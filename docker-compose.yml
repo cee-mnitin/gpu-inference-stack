@@ -529,7 +529,17 @@ services:
       - CONTRACT_EMBED_API_BASE=${CONTRACT_EMBED_API_BASE:-http://infinity:7997}
       - CONTRACT_RERANK_API_BASE=${CONTRACT_RERANK_API_BASE:-http://infinity:7997}
       - CONTRACT_OCR_API_BASE=${CONTRACT_OCR_API_BASE:-http://vllm:8000/v1}
-    command: --config /app/config/config.yaml --port 4000 --detailed_debug
+    # NO --detailed_debug by default. Measured on ddai3 2026-09-12: with it on,
+    # embeddings through the gateway ran at 49/s against the engine's ~1000/s —
+    # a 10x tax paid on EVERY request, because the flag logs the full request
+    # and response, and an embedding response is batch x 1024 floats. It also
+    # made the cost scale with batch size, so the bigger the batch a caller
+    # sent to go faster, the more it lost. Removing it: 49 -> 507/s float,
+    # 155 -> 1253/s base64, and chat overhead 65 -> 58ms.
+    #
+    # Set LITELLM_EXTRA_ARGS=--detailed_debug to get it back for a debugging
+    # session; it is a debugging tool, not a deployment setting.
+    command: --config /app/config/config.yaml --port 4000 ${LITELLM_EXTRA_ARGS:-}
     depends_on:
       redis:
         condition: service_healthy
