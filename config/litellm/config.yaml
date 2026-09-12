@@ -165,6 +165,21 @@ model_list:
       # Vision calls are expensive and a blind retry doubles the cost of a
       # genuinely bad image. Per-deployment override of router num_retries.
       num_retries: 0
+      # Thinking OFF, for the same reason as bulk and fast — plus one specific
+      # to this role. Measured on ddai4 2026-09-12 against Qwen3.6-35B-A3B: a
+      # hybrid-thinking model spends the token budget reasoning BEFORE it emits
+      # any content, so at max_tokens 16 and 64 the reply was content:null with
+      # finish_reason:length, and only at 1024 did it answer — after 148
+      # reasoning tokens to say "OK". A consumer sending an image with a modest
+      # max_tokens gets an empty answer rather than an error.
+      #
+      # Vision is where that bites hardest: the role exists for describing and
+      # extracting from images, which is not reasoning-limited work, and image
+      # tokens already consume the budget this model would rather spend
+      # thinking. Inert on a non-thinking model — an unknown chat-template
+      # variable is ignored by the template.
+      chat_template_kwargs:
+        enable_thinking: false
     model_info:
       mode: chat
       supports_vision: true

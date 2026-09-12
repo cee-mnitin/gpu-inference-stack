@@ -162,6 +162,11 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
+      # Read by vLLM itself, so it keeps its own VLLM_ name rather than the
+      # GIS_ rename below. Default "0", NEVER empty: vLLM parses it as
+      # bool(int(os.getenv(...,"0"))) and int("") raises, so a `-` default
+      # would crash the engine at import on every box that leaves it unset.
+      - VLLM_HAS_FLASHINFER_CUBIN=${VLLM_HAS_FLASHINFER_CUBIN:-0}
       # Container-internal names are GIS_*, not VLLM_*, on purpose: vLLM scans
       # its own VLLM_ namespace at startup and logs "Unknown vLLM environment
       # variable" for every one of these, which buried real warnings in noise.
@@ -195,6 +200,11 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
+      # Read by vLLM itself, so it keeps its own VLLM_ name rather than the
+      # GIS_ rename below. Default "0", NEVER empty: vLLM parses it as
+      # bool(int(os.getenv(...,"0"))) and int("") raises, so a `-` default
+      # would crash the engine at import on every box that leaves it unset.
+      - VLLM_HAS_FLASHINFER_CUBIN=${VLLM_HAS_FLASHINFER_CUBIN:-0}
       - GIS_MODEL=${VLLM2_MODEL:-${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B-FP8}}
       - GIS_MODEL_NAME=${VLLM2_MODEL_NAME:-${VLLM_MODEL_NAME:-qwen3.6}-2}
       - GIS_GPU_UTIL=${VLLM2_GPU_MEMORY_UTILIZATION:-0.25}
@@ -220,6 +230,11 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
+      # Read by vLLM itself, so it keeps its own VLLM_ name rather than the
+      # GIS_ rename below. Default "0", NEVER empty: vLLM parses it as
+      # bool(int(os.getenv(...,"0"))) and int("") raises, so a `-` default
+      # would crash the engine at import on every box that leaves it unset.
+      - VLLM_HAS_FLASHINFER_CUBIN=${VLLM_HAS_FLASHINFER_CUBIN:-0}
       - GIS_MODEL=${VLLM3_MODEL:-${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B-FP8}}
       - GIS_MODEL_NAME=${VLLM3_MODEL_NAME:-${VLLM_MODEL_NAME:-qwen3.6}-3}
       - GIS_GPU_UTIL=${VLLM3_GPU_MEMORY_UTILIZATION:-0.25}
@@ -715,7 +730,7 @@ services:
     container_name: node-exporter
     restart: unless-stopped
     ports:
-      - "9100:9100"
+      - "${NODE_EXPORTER_PORT:-9100}:9100"
     command:
       - '--path.procfs=/host/proc'
       - '--path.sysfs=/host/sys'
@@ -741,7 +756,7 @@ services:
     container_name: dcgm-exporter
     restart: unless-stopped
     ports:
-      - "9400:9400"
+      - "${DCGM_EXPORTER_PORT:-9400}:9400"
     deploy:
       resources:
         reservations:
@@ -767,7 +782,7 @@ services:
     container_name: redis-exporter
     restart: unless-stopped
     ports:
-      - "9121:9121"
+      - "${REDIS_EXPORTER_PORT:-9121}:9121"
     environment:
       - REDIS_ADDR=redis:6379
     depends_on:

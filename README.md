@@ -211,6 +211,56 @@ Key settings to review:
 ./scripts/health-check.sh
 ```
 
+### Model store — look on the NAS before the internet
+
+Every box in the fleet serves the same handful of public checkpoints, and they
+are large: Qwen3.6-35B-A3B in NVFP4 is **23.5 GB**. Downloading that per box
+took **37 minutes** over this site's ~13 MB/s internet link; the same bytes come
+off the NAS at **~92 MB/s**, about 4 minutes.
+
+`make setup` step 6/6 therefore runs:
+
+```bash
+make model-store ARGS=sync
+```
+
+which, for every model the active profile names:
+
+1. leaves it alone if it is already cached locally,
+2. otherwise copies it from `MODEL_STORE_DIR` if it is there,
+3. otherwise downloads it from Hugging Face **and publishes it to the store**,
+   so the first box to need a checkpoint is the only one that pays for it.
+
+```bash
+make model-store                       # status: what the profile needs, and where each model is
+make model-store ARGS=list             # what the store holds
+make model-store ARGS=sync             # the above three-step reconciliation
+./scripts/model-store.sh publish <repo>  # push one model you already have
+./scripts/model-store.sh fetch <repo>    # pull one model without downloading
+```
+
+The store is itself a valid `HF_HOME` — `$MODEL_STORE_DIR/hub/models--<org>--<name>`,
+huggingface_hub's own layout — so profiles keep naming plain repo ids
+(`VLLM_MODEL=nvidia/Qwen3.6-35B-A3B-NVFP4`) and nothing downstream knows the NAS
+exists.
+
+**A missing store makes this slow, never broken.** A box where
+`MODEL_STORE_DIR` is unset or not mounted says so and falls back to Hugging Face.
+
+Three things worth knowing before changing it:
+
+- **Publishing is a rename, not a lock.** The NAS is mounted `local_lock=all`,
+  so `flock` on it is local to one host and two boxes would both believe they
+  held it. Copies stage into a per-host, per-pid directory on the same
+  filesystem and finish with a single atomic rename; losing that race costs one
+  redundant copy and never a corrupt store.
+- **The copy runs inside a root container.** vLLM populates the cache as root
+  and huggingface_hub writes `trees/<sha>.json` mode 0600, so a plain host-side
+  `rsync` fails with `Permission denied` and exit 23 — a *partial* transfer that
+  discards everything it had already copied.
+- **Attribute caching is 120s.** A model published seconds ago can be invisible
+  to another box for a couple of minutes. The cost is a redundant download.
+
 ## Usage
 
 ### Making Inference Requests
