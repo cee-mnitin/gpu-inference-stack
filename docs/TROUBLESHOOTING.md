@@ -567,3 +567,65 @@ EOF
 ```
 
 4. **Contact support** with debug report
+
+## A wedged engine that reports healthy
+
+**Symptom.** Every inference request times out — through the gateway and
+directly — while `docker ps` shows the container `Up (healthy)` and the logs
+show nothing. Observed on ddai3 2026-09-12: Infinity served no embeddings for
+11 minutes in this state and would have continued indefinitely.
+
+**Why it hid.** The healthcheck was `GET /health`, answered by the container's
+HTTP layer. The HTTP layer was fine; the inference path was not, and the probe
+never touched it. A liveness probe cannot see a hung engine.
+
+**Why nothing recovered it.** `restart: unless-stopped` fires when a process
+EXITS. Docker has no "restart on unhealthy" — an unhealthy container is
+labelled and left running. Killing PID 1 from inside does not work either: in
+these images PID 1 *is* the engine, and the kernel discards default-action
+signals sent to PID 1 from within its own namespace unless the process has a
+handler — which a wedged event loop cannot run. That was tried and measured to
+fail.
+
+**What is in place now.**
+
+1. `scripts/healthprobe.py` — the container healthcheck for `vllm` and
+   `infinity`. Sends a real one-token completion / one-item embedding and
+   checks the response shape, so a wedged engine goes `unhealthy` in ~2.5 min.
+2. `scripts/watchdog.sh` — runs on the HOST, restarts containers Docker
+   reports unhealthy. Requires `WATCHDOG_THRESHOLD` consecutive observations
+   (default 3) and rate-limits restarts to one per `WATCHDOG_COOLDOWN_S`
+   (default 900s), because an engine under load is slow, not hung.
+
+Install the timer (user unit — it needs your docker access, nothing more):
+
+    mkdir -p ~/.config/systemd/user
+    cp scripts/systemd/gis-watchdog.{service,timer} ~/.config/systemd/user/
+    systemctl --user daemon-reload
+    systemctl --user enable --now gis-watchdog.timer
+    loginctl enable-linger "$USER"      # so it runs when you are not logged in
+
+Check it:
+
+    scripts/watchdog.sh --dry-run       # report, change nothing
+    systemctl --user list-timers gis-watchdog.timer
+    journalctl --user -u gis-watchdog.service -n 50
+
+**A restart is not a fix.** If the cooldown line appears in the log —
+`unhealthy but restarted Ns ago … this needs a human` — the engine is failing
+faster than it is being replaced, and something upstream is wrong.
+
+### Known trigger: oversized embedding requests
+
+One request of **32 texts x ~4000 characters** (~32k tokens in a single call)
+wedges Infinity permanently and reproducibly on this hardware. 16 texts of the
+same length is the fastest setting measured and does not wedge it. This is a
+hang, not a slowdown: the engine never recovers on its own, and every
+subsequent request times out.
+
+So a bulk-embedding consumer must cap BOTH:
+
+* texts per request — 16 or fewer at dossier length, and
+* concurrent requests — 8 (see `servers/common-blackwell-32gb.env`).
+
+ember's embedder caps the first with `EMBED_CHUNK_SIZE` and embeds serially.

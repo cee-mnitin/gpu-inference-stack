@@ -1,0 +1,15 @@
+[Unit]
+Description=gpu-inference-stack watchdog — restart engines Docker reports unhealthy
+Documentation=file:%h/projects/gpu-inference-stack/docs/TROUBLESHOOTING.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# USER unit, not system: it needs the operator's docker access and nothing
+# more. Running it as root would hand a restart loop more privilege than the
+# thing it is restarting.
+ExecStart=%h/projects/gpu-inference-stack/scripts/watchdog.sh --once
+# Inherited by the script; override here rather than editing the script.
+Environment=WATCHDOG_THRESHOLD=3
+Environment=WATCHDOG_COOLDOWN_S=900

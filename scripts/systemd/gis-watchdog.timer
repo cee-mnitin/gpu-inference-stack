@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the gpu-inference-stack watchdog every minute
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=60s
+# The watchdog needs THRESHOLD consecutive observations, so the effective
+# reaction time is interval x threshold — 3 minutes at these defaults, on top
+# of the ~2.5 minutes Docker itself takes to call a container unhealthy.
+# Deliberate: an engine under load must not be restarted for being slow.
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

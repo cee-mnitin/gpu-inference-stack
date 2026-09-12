@@ -20,6 +20,7 @@ x-vllm-instance: &vllm-instance
   volumes:
     - ${VLLM_CACHE_DIR:-./data/vllm/cache}:/root/.cache
     - ${HF_HOME:-./data/huggingface}:/root/.cache/huggingface
+    - ./scripts/healthprobe.py:/healthprobe.py:ro
   # SHELL FORM, deliberately. A YAML-list command cannot express "omit this
   # flag": a variable expanding to "" still produces an empty argv entry, and
   # vLLM rejects it. `${VAR:+…}` in the container's shell emits nothing at all
@@ -58,9 +59,19 @@ x-vllm-instance: &vllm-instance
   networks:
     - gpu-inference-net
   healthcheck:
-    test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=2).status==200 else 1)\""]
+    # A one-token completion, not /health: vLLM's /health answers from the API
+    # server process, so it reports fine while the engine core is wedged or
+    # dead — the same blind spot that hid an 11-minute Infinity outage on
+    # 2026-09-12 behind a green container.
+    #
+    # The probe kills PID 1 after --threshold consecutive failures so the
+    # restart policy replaces the container; `restart: unless-stopped` alone
+    # never acts on health. THRESHOLD is deliberately reluctant: an engine
+    # under load is slow, not hung, and restarting a busy vLLM costs minutes of
+    # model load.
+    test: ["CMD-SHELL", "python3 /healthprobe.py --url http://localhost:8000/v1/chat/completions --kind chat --model $${GIS_MODEL_NAME} --timeout ${HEALTHPROBE_TIMEOUT:-20} --threshold ${HEALTHPROBE_THRESHOLD:-5}"]
     interval: 30s
-    timeout: 5s
+    timeout: 25s
     retries: 10
     start_period: 600s
   logging:
@@ -362,6 +373,7 @@ services:
       - "${INFINITY_PORT:-7997}:7997"
     volumes:
       - ${HF_HOME:-./data/huggingface}:/app/.cache
+      - ./scripts/healthprobe.py:/healthprobe.py:ro
     environment:
       - HF_HOME=/app/.cache
       - INFINITY_QUEUE_SIZE=${INFINITY_QUEUE_SIZE:-512}
@@ -379,12 +391,23 @@ services:
     networks:
       - gpu-inference-net
     healthcheck:
-      # python3, not curl — this image has no curl, and a healthcheck that can
-      # never pass is worse than none: it cannot report a backend that has
-      # genuinely died, and it makes depends_on: service_healthy unusable.
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7997/health',timeout=3).status==200 else 1)\""]
+      # Probes the INFERENCE path, not /health. On 2026-09-12 this container
+      # served no embeddings for ~11 minutes — every request timed out, via the
+      # gateway and directly — while Docker reported it healthy the entire
+      # time, because /health is answered by the HTTP layer and the HTTP layer
+      # was fine. A liveness probe cannot see a wedged engine.
+      #
+      # healthprobe.py also RESETS it: `restart: unless-stopped` acts on process
+      # exit, never on health status, so an unhealthy container is otherwise
+      # just labelled and left. After --threshold consecutive failures the probe
+      # kills PID 1 and the restart policy replaces the container. See the
+      # script for why this is not an autoheal sidecar (no docker.sock).
+      test: ["CMD-SHELL", "python3 /healthprobe.py --url http://localhost:7997/embeddings --kind embeddings --model BAAI/bge-m3 --timeout ${HEALTHPROBE_TIMEOUT:-20} --threshold ${HEALTHPROBE_THRESHOLD:-5}"]
       interval: 30s
-      timeout: 10s
+      # Above the probe's own timeout, so Docker never kills the probe before
+      # it can record a failure — a killed probe leaves the counter unchanged
+      # and the engine never gets reset.
+      timeout: 25s
       retries: 5
       # Two models load sequentially from cold; the second only starts after the
       # first has warmed up.
