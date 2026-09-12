@@ -597,13 +597,32 @@ fail.
    (default 3) and rate-limits restarts to one per `WATCHDOG_COOLDOWN_S`
    (default 900s), because an engine under load is slow, not hung.
 
-Install the timer (user unit — it needs your docker access, nothing more):
+`make setup` installs and enables it as step 7/7. To do it on its own, or after
+editing the units (it is idempotent):
+
+    make watchdog          # == ./scripts/install-watchdog.sh
+
+That copies the units to ~/.config/systemd/user, enables the timer, and turns on
+LINGERING — which is not optional. Without it the user manager, and this timer
+with it, stops at logout and never starts at boot, so a box stays protected
+exactly until the operator who set it up disconnects. Enabling it for your own
+user is normally allowed with no password; where a stricter polkit policy
+applies the script tells you to run `sudo loginctl enable-linger <user>`.
+
+It is a USER unit, not a system one: running the restarter as root would hand it
+more privilege than the thing it restarts. For the same reason the service must
+NOT declare `Requires=docker.service` — that is a system unit a user manager
+cannot see, and systemd refuses to queue the job rather than treating it as a
+soft miss, which killed the timer on activation and meant the watchdog never ran
+at all (found on ddai4 2026-09-12, the first host to enable it).
+
+The equivalent by hand:
 
     mkdir -p ~/.config/systemd/user
     cp scripts/systemd/gis-watchdog.{service,timer} ~/.config/systemd/user/
     systemctl --user daemon-reload
     systemctl --user enable --now gis-watchdog.timer
-    loginctl enable-linger "$USER"      # so it runs when you are not logged in
+    loginctl enable-linger "$USER"
 
 Check it:
 
