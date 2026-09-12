@@ -1,8 +1,18 @@
 [Unit]
 Description=gpu-inference-stack watchdog — restart engines Docker reports unhealthy
 Documentation=file:%h/projects/gpu-inference-stack/docs/TROUBLESHOOTING.md
-After=docker.service
-Requires=docker.service
+# NO After=/Requires=docker.service. This is a USER unit (see below) and
+# docker.service is a SYSTEM unit, which a user manager cannot see. systemd
+# does not treat that as a soft miss: it refuses to queue the job at all —
+#   gis-watchdog.timer: Failed to queue unit startup job:
+#       Unit docker.service not found.
+#   gis-watchdog.timer: Failed with result 'resources'.
+# — and the TIMER then dies on activation, so the watchdog never ran once.
+# Found on ddai4 2026-09-12, on the first host that enabled it.
+#
+# Nothing is lost by dropping it: watchdog.sh runs `docker ps ... 2>/dev/null`
+# and exits 0 on an empty result, so a boot where Docker is not up yet is a
+# no-op and the next tick 60s later does the work.
 
 [Service]
 Type=oneshot
