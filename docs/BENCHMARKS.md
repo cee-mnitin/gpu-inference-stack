@@ -1,17 +1,82 @@
 # Benchmarking a chat backend on this stack
 
-Three layers, because no single tool covers what matters here.
+Four layers, because no single tool covers what matters here.
 
 | layer | tool | answers |
 |---|---|---|
 | raw engine | `llama-bench` | how fast can this quant prefill and decode on this card, with no server in the way |
 | serving | `vllm bench serve` / `guidellm` | TTFT, TPOT, throughput under concurrency, against the OpenAI endpoint |
 | **contract** | `scripts/benchmark.sh` | do tool calls parse, does JSON validate, does ≥32k context actually work |
+| **regression** | `scripts/chain-bench.sh` | did any of that get better or worse than the last time it was recorded |
 
 The third layer is the one that is easy to skip and the one most likely to be
 broken. `gpu/chat/interactive`, `/bulk` and `/fast` promise **tool calling,
 JSON `response_format`, and ≥32k context** — none of which a tokens/sec
 benchmark measures. A backend can hit 40 tok/s and still drop every tool call.
+
+## Layer 4: regression — before and after a change
+
+Layer 3 tells you whether the stack honours the contract *now*. It cannot tell
+you whether a change helped, because there is nothing to compare against.
+`chain-bench.sh` writes a JSON result you re-run and diff:
+
+```bash
+scripts/chain-bench.sh --label before
+#   ... change an alias, a flag, a model ...
+scripts/chain-bench.sh --label after
+scripts/chain-bench.sh --compare before after
+```
+
+```
+metric                                  before      after   change
+interactive json_object p95_s            22.71       0.56    0.02x
+interactive json_object malformed            8          0
+interactive json_object place_recall     0.583        1.0    1.71x
+interactive json_schema p50_out_tok       1537         70    0.05x
+```
+
+That is a real run: `gpu/chat/interactive` was the one chat role still serving
+a hybrid-thinking model in thinking mode
+(`docs/superpowers/specs/2026-09-12-interactive-role-thinking-mode.md`). None
+of those four numbers is visible to a tokens/sec benchmark, and the second one
+— **8 of 20 responses unparseable** — was not visible to layer 3 either, because
+layer 3 samples a JSON call rather than measuring how often it fails.
+
+What it records that layer 3 does not, and why each is there:
+
+- **reasoning tokens**, separately from output tokens. A hybrid-thinking model
+  can spend twenty times the budget invisibly; total latency does not say where
+  it went.
+- **`malformed` and `null_content` as distinct counters.** These are the two
+  ways a JSON role fails *without erroring*: a corrupt reasoning→content
+  handoff, and `content: null` at `finish_reason: length` when the budget is
+  spent reasoning. A consumer sees the second as data — ember's sync path turns
+  it into an empty extraction recorded as a success.
+- **recall against a fixed gold set.** A change that makes a role faster by
+  extracting less reads as an unambiguous win to a latency-only harness.
+- **the graph-shaped load** — 96 chunks of ~1200 tokens, which is the shape
+  ember's heaviest stage issues. Its knee is not the knee of a short-prompt
+  sweep: on ddai4 short prompts saturate near 32 in-flight at ~1790 tok/s,
+  while the chunk workload reaches 149 chunks/min at 32 and buys nothing at 48
+  except 1.8× the p95.
+- **vLLM's prefix-cache and preemption counters** across the run. ddai4 reports
+  a 0% hit rate, and the cause is only visible here: Qwen3.6 is a hybrid GDN
+  model, so vLLM forces a 2176-token attention block and a shared prefix
+  shorter than that can never hit — which makes `--block-size 128` in the
+  profile inert.
+- **per-tier hop overhead**, so a regression is attributed to the engine, this
+  gateway, or the consumer's.
+
+```bash
+scripts/chain-bench.sh --label x --only extraction,embed     # a subset
+scripts/chain-bench.sh --label x --trials 40                 # tighter samples
+scripts/chain-bench.sh --label x \
+    --consumer http://127.0.0.1:4011 --consumer-key sk-...    # also measure ember's tier
+```
+
+Results land in `data/chain-bench/<label>.json`, which is gitignored — a
+measurement belongs to one box at one moment, and a number carried between
+machines is how a tuning value outlives the hardware it was measured on.
 
 ## Layer 3: contract dimensions
 
