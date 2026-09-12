@@ -54,6 +54,30 @@ model_list:
       # delegation impossible — the peer's LiteLLM 401s.
       api_key: os.environ/CONTRACT_INTERACTIVE_API_KEY
       timeout: 600
+      # Hybrid-thinking models: thinking OFF here too, for the same reasons as
+      # bulk/fast/vision. This role promises "JSON response_format, latency-
+      # tuned", and thinking-on breaks both. Measured on ddai4 2026-09-12
+      # against Qwen3.6-35B-A3B (n=20, identical extraction prompt):
+      #   json_schema  p50 8.65s vs bulk's 0.52s; 1537 output tokens of which
+      #                1466 are reasoning, vs 70 and 0.
+      #   json_object  8 of 20 responses were UNPARSEABLE — the reasoning->
+      #                content handoff emits a corrupt prefix
+      #                (`{": {": {"orgs": [...`) because the JSON grammar binds
+      #                from the first content token while the reasoning span is
+      #                unconstrained (enable_in_reasoning=False).
+      #   content:null with finish_reason:length at modest max_tokens, because
+      #                the budget is spent reasoning before any content — which
+      #                ember's sync path turns into a silently EMPTY extraction
+      #                recorded as a success.
+      # Recall was identical (1.00) with and without reasoning, so nothing was
+      # bought for that cost. Spec: docs/superpowers/specs/2026-09-12-
+      # interactive-role-thinking-mode.md.
+      #
+      # A consumer that genuinely wants reasoning on a given call sends
+      # extra_body {"chat_template_kwargs": {"enable_thinking": true}}, which
+      # wins by the router's merge order. Inert on a non-thinking model.
+      chat_template_kwargs:
+        enable_thinking: false
     model_info:
       mode: chat
       supports_function_calling: true
