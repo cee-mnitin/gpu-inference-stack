@@ -45,7 +45,7 @@ $(shell set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f";
 endef
 
 .PHONY: help setup start stop restart status logs health models urls \
-        check pull build clean versions _require_profile
+        check pull build clean versions model-store _require_profile
 
 help:
 	@printf "$(BOLD)gpu-inference-stack$(RST)\n\n"
@@ -58,6 +58,7 @@ help:
 	@printf "  make models   what is served now     make urls     endpoints\n"
 	@printf "  make logs     tail all logs             make check    prerequisites only\n"
 	@printf "  make versions configured vs running images\n"
+	@printf "  $(BOLD)make model-store$(RST) shared NAS checkpoint store $(DIM)(ARGS=sync|list|status)$(RST)\n"
 	@printf "  $(DIM)make clean    also removes volumes (keys, dashboards) — asks first$(RST)\n\n"
 	@printf "  $(DIM)Override detection:  make setup PROFILE=85$(RST)\n"
 	@printf "  $(DIM)AUTO=1       take the default answer to every prompt$(RST)\n"
@@ -79,7 +80,7 @@ _require_profile:
 
 # ---------------------------------------------------------------------------
 setup:
-	@printf "$(BOLD)1/5  Which server is this?$(RST)\n"
+	@printf "$(BOLD)1/6  Which server is this?$(RST)\n"
 	@set -e; \
 	prof="$(PROFILE)"; \
 	if [ -z "$$prof" ]; then prof="$$(./scripts/detect-server.sh || true)"; fi; \
@@ -113,17 +114,28 @@ setup:
 	  sed -i "s|^SERVER_PROFILE=.*|SERVER_PROFILE=$$prof|" .env; \
 	else printf 'SERVER_PROFILE=%s\n' "$$prof" >> .env; fi; \
 	printf "  $(GRN)✓$(RST) .env now selects profile $(BOLD)%s$(RST)\n" "$$prof"
-	@printf "\n$(BOLD)2/5  Prerequisites$(RST)\n"
+	@printf "\n$(BOLD)2/6  Prerequisites$(RST)\n"
 	@$(MAKE) --no-print-directory check
-	@printf "\n$(BOLD)3/5  Contract wiring$(RST)\n"
+	@printf "\n$(BOLD)3/6  Contract wiring$(RST)\n"
 	@./scripts/check-contract-wiring.sh
-	@printf "\n$(BOLD)4/5  Pulling images$(RST)  $(DIM)(--ignore-buildable: litellm is built locally)$(RST)\n"
+	@printf "\n$(BOLD)4/6  Pulling images$(RST)  $(DIM)(--ignore-buildable: litellm is built locally)$(RST)\n"
 	@$(DC) $(enabled_profiles) pull --ignore-buildable
-	@printf "\n$(BOLD)5/5  Building local images$(RST)\n"
+	@printf "\n$(BOLD)5/6  Building local images$(RST)\n"
 	@$(MAKE) --no-print-directory build
+	@printf "\n$(BOLD)6/6  Models$(RST)  $(DIM)(shared NAS store first, Hugging Face only as a fallback)$(RST)\n"
+	@./scripts/model-store.sh sync || printf "  $(YEL)! model sync incomplete — vLLM will fetch what is missing at start$(RST)\n"
 	@printf "\n$(BOLD)Resolved image versions$(RST)  $(DIM)(what you will actually run)$(RST)\n"
 	@$(MAKE) --no-print-directory versions
 	@printf "\n$(GRN)$(BOLD)Setup complete.$(RST)  Run $(BOLD)make start$(RST)\n"
+
+# ---------------------------------------------------------------------------
+## model-store: the shared NAS checkpoint store — status | sync | list |
+##   publish <repo> | fetch <repo>. `sync` is what `make setup` runs: it puts
+##   every model the profile names into the local cache, taking it from the NAS
+##   when it is there and publishing it back when it is not, so the first box to
+##   need a checkpoint is the only one that downloads it.
+model-store: _require_profile
+	@./scripts/model-store.sh $(or $(ARGS),status)
 
 # ---------------------------------------------------------------------------
 check: _require_profile
