@@ -1,6 +1,8 @@
 # Environment and secrets
 .env
 .env.local
+.env.secrets.plain
+.age-key.txt
 *.key
 *.pem
 
