@@ -114,7 +114,11 @@ setup:
 	if grep -q '^SERVER_PROFILE=' .env; then \
 	  sed -i "s|^SERVER_PROFILE=.*|SERVER_PROFILE=$$prof|" .env; \
 	else printf 'SERVER_PROFILE=%s\n' "$$prof" >> .env; fi; \
-	printf "  $(GRN)✓$(RST) .env now selects profile $(BOLD)%s$(RST)\n" "$$prof"
+	printf "  $(GRN)✓$(RST) .env now selects profile $(BOLD)%s$(RST)\n" "$$prof"; \
+	if ! ./scripts/check-env-overrides.sh; then \
+	  printf "\n$(YEL)⚠  Fix the overrides above before continuing.$(RST)\n"; \
+	  printf "$(DIM)They defeat profile selection. Or bypass: SKIP_ENV_CHECK=1 make setup$(RST)\n"; \
+	  [ "$(SKIP_ENV_CHECK)" = "1" ] || exit 1; fi
 	@printf "\n$(BOLD)2/7  Prerequisites$(RST)\n"
 	@$(MAKE) --no-print-directory check
 	@printf "\n$(BOLD)3/7  Contract wiring$(RST)\n"

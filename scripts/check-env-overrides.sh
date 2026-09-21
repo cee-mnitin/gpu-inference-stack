@@ -88,7 +88,7 @@ PROVIDER_VARS=(
   CONTRACT_RERANK_ALIAS
 )
 
-if [ ! -f .env ]; then
+if [ ! -f /tmp/test.env ]; then
   exit 0  # No .env = no overrides
 fi
 
