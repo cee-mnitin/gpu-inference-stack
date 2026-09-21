@@ -81,10 +81,26 @@ the committed profile supplies this box's hardware, models, VRAM split, ports
 and role wiring, while `.env` supplies only what is genuinely per-host:
 `SERVER_PROFILE`, the fleet address block, secrets, and host paths.
 
-That ordering is the design. It also means **anything uncommented in `.env`
-beats the profile** — useful for a deliberate one-off, and the reason every
-profile-owned key ships commented out in `.env.example`. An uncommented copy of
-a profile's key silently defeats profile selection.
+### What belongs where
+
+**`.env` (per-host, gitignored):**
+- `SERVER_PROFILE=85` — which profile to load
+- Secrets — `LITELLM_MASTER_KEY`, `GRAFANA_ADMIN_PASSWORD`
+- Host paths — `DATA_DIR`, `HF_HOME`, `OLLAMA_MODELS_DIR`
+- Fleet topology — `GPU_40_URL`, `GPU_85_KEY` for peer boxes
+- Port overrides (rare) — when a conflicting service already holds the default
+
+**`servers/server-*.env` (committed profiles):**
+- Hardware settings — `VLLM_GPU_MEMORY_UTILIZATION`, `VLLM_MAX_MODEL_LEN`
+- Model selection — `VLLM_MODEL`, `LLAMACPP_MODEL_FILE`
+- Service enablement — `ENABLE_VLLM`, `ENABLE_LLAMACPP`
+- Contract wiring — which models fill which `gpu/<task>/<role>`
+
+**The trap:** Anything uncommented in `.env` **beats the profile** — so
+`VLLM_MAX_MODEL_LEN=16384` in `.env` defeats `VLLM_MAX_MODEL_LEN=65536` in the
+profile, and the container gets 16384. This is why `make start` now runs
+`scripts/check-env-overrides.sh` first — it detects provider settings in `.env`
+and refuses to start until they are removed or commented out.
 
 The old flow was `cp servers/server-x.env .env`, which forks the profile the
 moment anything is tuned: the box drifts from the committed file and nothing

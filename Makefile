@@ -187,6 +187,13 @@ check: _require_profile
 # ---------------------------------------------------------------------------
 start: _require_profile
 	@printf "$(BOLD)Starting$(RST) $(DIM)profile $(PROFILE_NAME)$(RST)\n"
+	@# Check for .env overrides that shadow profile settings. This catches the
+	@# case where .env has VLLM_MAX_MODEL_LEN=16384 while the profile says 65536,
+	@# and the container gets 16384 because .env loads last and wins.
+	@if ! ./scripts/check-env-overrides.sh; then \
+	  printf "\n$(YEL)Fix the overrides above, then re-run make start.$(RST)\n"; \
+	  printf "$(DIM)Or ignore this check with: SKIP_ENV_CHECK=1 make start$(RST)\n\n"; \
+	  [ "$(SKIP_ENV_CHECK)" = "1" ] || exit 1; fi
 	@$(DC) $(enabled_profiles) up -d
 	@# A container left behind by a profile this box no longer enables is still
 	@# part of the compose project, so it shows in `ps` and would otherwise gate
