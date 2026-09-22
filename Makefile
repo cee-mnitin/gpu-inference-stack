@@ -66,6 +66,9 @@ help:
 	@printf "  $(DIM)REBUILD=1    rebuild, reusing the Docker layer cache$(RST)\n"
 	@printf "  $(DIM)NO_CACHE=1   like REBUILD but ignore the cache$(RST)\n"
 	@printf "  $(DIM)SKIP_BUILD=1 skip the build$(RST)\n"
+	@printf "  $(DIM)  SKIP_PREFLIGHT=1      skip pre-flight checks before start$(RST)\n"
+	@printf "  $(DIM)  PREFLIGHT_STRICT=1    treat warnings as errors$(RST)\n"
+	@printf "  $(DIM)  PREFLIGHT_NO_AUTOFIX=1 show fixes but don't apply them$(RST)\n"
 	@printf "  $(DIM)Ad-hoc compose:      ./scripts/dc.sh ps$(RST)\n\n"
 	@if [ -n "$(PROFILE_NAME)" ]; then \
 	  printf "  Active profile: $(BOLD)$(PROFILE_NAME)$(RST)  $(DIM)($(PROFILE_FILE))$(RST)\n\n"; \
@@ -191,6 +194,10 @@ check: _require_profile
 # ---------------------------------------------------------------------------
 start: _require_profile
 	@printf "$(BOLD)Starting$(RST) $(DIM)profile $(PROFILE_NAME)$(RST)\n"
+	@# Run pre-flight checks (auto-fixes where possible)
+	@if [ "$(SKIP_PREFLIGHT)" != "1" ]; then \
+	  ./scripts/preflight-checks.sh || exit 1; \
+	fi
 	@# Check for .env overrides that shadow profile settings. This catches the
 	@# case where .env has VLLM_MAX_MODEL_LEN=16384 while the profile says 65536,
 	@# and the container gets 16384 because .env loads last and wins.
