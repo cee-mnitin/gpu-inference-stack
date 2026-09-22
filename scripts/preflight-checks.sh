@@ -31,6 +31,21 @@ check_docker_daemon() {
     fi
 }
 
+# Check 2: Disk space >= 5GB free
+check_disk_space() {
+    local free_gb
+    free_gb=$(df -BG . | awk 'NR==2 {print $4}' | sed 's/G//')
+
+    if [ "$free_gb" -ge 5 ]; then
+        printf "  ${GRN}✓${RST} Disk space OK (${free_gb} GB free)\n"
+        return 0
+    else
+        printf "  ${YEL}!${RST} Low disk space: ${free_gb} GB free (recommend 5GB+)\n"
+        printf "    ${DIM}Suggestion: docker system prune -a${RST}\n"
+        return 1
+    fi
+}
+
 main() {
     printf "Running pre-flight checks...\n\n"
 
@@ -39,6 +54,9 @@ main() {
 
     # Tier 2 - Critical
     check_docker_daemon || errors=$((errors + 1))
+
+    # Tier 1 - Warnings
+    check_disk_space || warnings=$((warnings + 1))
 
     printf "\n"
 
