@@ -19,6 +19,40 @@ AUTO=${AUTO:-0}
 
 # Return codes: 0=pass, 1=warning, 2=critical error
 
+# Helper: Show error box for critical failures
+show_error_box() {
+    local title="$1"
+    local message="$2"
+    local remediation="$3"
+
+    local width=61
+    local border_top="┌─────────────────────────────────────────────────────────┐"
+    local border_mid="├─────────────────────────────────────────────────────────┤"
+    local border_bot="└─────────────────────────────────────────────────────────┘"
+
+    printf "\n%s\n" "$border_top"
+    printf "│ ${RED}✗${RST} %-53s │\n" "$title"
+    printf "%s\n" "$border_mid"
+    printf "│ %-57s │\n" ""
+
+    # Print message lines
+    while IFS= read -r line; do
+        printf "│ %-57s │\n" "$line"
+    done <<< "$message"
+
+    printf "│ %-57s │\n" ""
+
+    if [ -n "$remediation" ]; then
+        printf "│ ${BOLD}To fix:${RST}%-49s │\n" ""
+        while IFS= read -r line; do
+            printf "│   %-55s │\n" "$line"
+        done <<< "$remediation"
+        printf "│ %-57s │\n" ""
+    fi
+
+    printf "%s\n\n" "$border_bot"
+}
+
 # Helper: Get compose project name
 get_compose_project() {
     basename "$(pwd)"
@@ -197,11 +231,28 @@ check_port_conflicts() {
                 fi
             fi
         else
-            # External process
-            printf "  ${RED}✗${RST} Port conflict: $port in use by external process\n"
-            printf "    ${DIM}Check with: sudo lsof -i :$port${RST}\n"
-            printf "    ${DIM}Or change port in .env (e.g., LITELLM_PORT=$((port+1)))${RST}\n"
-            conflicts=$((conflicts + 1))
+            # External process - show error box
+            local process_info
+            if command -v lsof >/dev/null 2>&1; then
+                process_info=$(sudo lsof -i ":$port" 2>/dev/null | grep LISTEN | awk '{print $1 " (PID " $2 ")"}' | head -1)
+            else
+                process_info="Unknown process"
+            fi
+
+            show_error_box \
+                "Pre-flight check failed: Port conflict" \
+                "Port $port is already in use by:
+  $process_info" \
+                "1. Stop the conflicting process:
+   sudo kill <PID>
+
+2. Or change the port in .env:
+   LITELLM_PORT=$((port+1))
+
+3. Or force start anyway (not recommended):
+   SKIP_PREFLIGHT=1 make start"
+
+            ((conflicts++))
         fi
     done
 
