@@ -46,6 +46,30 @@ check_disk_space() {
     fi
 }
 
+# Check 3: GPU available with reasonable free memory
+check_gpu_availability() {
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        printf "  ${DIM}○${RST} GPU check skipped (nvidia-smi not found)\n"
+        return 0
+    fi
+
+    local free_mb
+    if ! free_mb=$(timeout 10 nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1); then
+        printf "  ${YEL}!${RST} GPU check timed out (continuing anyway)\n"
+        return 1
+    fi
+
+    if [ "$free_mb" -ge 500 ]; then
+        printf "  ${GRN}✓${RST} GPU available (${free_mb} MB free)\n"
+        return 0
+    else
+        printf "  ${YEL}!${RST} GPU memory low: ${free_mb} MB free\n"
+        printf "    ${DIM}Current processes:${RST}\n"
+        nvidia-smi pmon -c 1 2>/dev/null | grep -v '^#' | head -5 || true
+        return 1
+    fi
+}
+
 main() {
     printf "Running pre-flight checks...\n\n"
 
@@ -55,7 +79,8 @@ main() {
     # Tier 2 - Critical
     check_docker_daemon || errors=$((errors + 1))
 
-    # Tier 1 - Warnings
+    # Tier 2 - Resources
+    check_gpu_availability || warnings=$((warnings + 1))
     check_disk_space || warnings=$((warnings + 1))
 
     printf "\n"
