@@ -261,6 +261,18 @@ Three things worth knowing before changing it:
 - **Attribute caching is 120s.** A model published seconds ago can be invisible
   to another box for a couple of minutes. The cost is a redundant download.
 
+### Pre-flight Checks
+
+`make start` runs comprehensive checks before starting containers. It auto-fixes common issues like:
+
+- Container name conflicts from previous runs
+- Port conflicts with old containers
+- Missing volume directories
+
+See [docs/preflight-checks.md](docs/preflight-checks.md) for details.
+
+Skip checks: `SKIP_PREFLIGHT=1 make start`
+
 ## Usage
 
 ### Making Inference Requests
