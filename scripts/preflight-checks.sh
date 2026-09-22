@@ -19,6 +19,11 @@ AUTO=${AUTO:-0}
 
 # Return codes: 0=pass, 1=warning, 2=critical error
 
+# Helper: Get compose project name
+get_compose_project() {
+    basename "$(pwd)"
+}
+
 # Check 1: Docker daemon responsive
 check_docker_daemon() {
     if timeout 5 docker info >/dev/null 2>&1; then
@@ -70,6 +75,53 @@ check_gpu_availability() {
     fi
 }
 
+# Check 4: Container name conflicts (AUTO-FIX)
+check_container_conflicts() {
+    local project
+    project=$(get_compose_project)
+
+    # Get container names we care about from docker-compose.yml
+    local our_containers
+    our_containers="ollama|vllm-new|vllm2|vllm3|vllm-router-new|litellm|redis|postgres|prometheus|grafana|node-exporter|dcgm-exporter|redis-exporter|llamacpp|embeddings|infinity|nginx"
+
+    # Find containers matching our names that aren't part of our compose project
+    local conflicts
+    conflicts=$(docker ps -a --format '{{.Names}}\t{{.ID}}\t{{.Label "com.docker.compose.project"}}\t{{.CreatedAt}}' \
+        | grep -E "^($our_containers)\s" \
+        | grep -v "$project" \
+        | awk '{print $1 "\t" $2 "\t" $4 " " $5 " " $6}' || true)
+
+    if [ -z "$conflicts" ]; then
+        printf "  ${GRN}✓${RST} No container name conflicts\n"
+        return 0
+    fi
+
+    # Auto-fix: remove conflicting containers
+    local fixed=0
+    while IFS=$'\t' read -r name id created; do
+        printf "  ${YEL}⚠${RST} Container name conflict: ${name} (${id:0:8}, created ${created})\n"
+
+        if [ "$NO_AUTOFIX" = "1" ]; then
+            printf "    ${DIM}Would remove (PREFLIGHT_NO_AUTOFIX=1): docker rm -f ${name}${RST}\n"
+        else
+            printf "  ${DIM}→${RST} Removing conflicting container... "
+            if docker rm -f "$name" >/dev/null 2>&1; then
+                printf "done\n"
+                fixed=$((fixed + 1))
+            else
+                printf "failed\n"
+                return 2
+            fi
+        fi
+    done <<< "$conflicts"
+
+    if [ "$NO_AUTOFIX" = "1" ]; then
+        return 2
+    fi
+
+    return 0
+}
+
 main() {
     printf "Running pre-flight checks...\n\n"
 
@@ -82,6 +134,9 @@ main() {
     # Tier 2 - Resources
     check_gpu_availability || warnings=$((warnings + 1))
     check_disk_space || warnings=$((warnings + 1))
+
+    # Tier 1 - Conflicts (auto-fix)
+    check_container_conflicts || errors=$((errors + 1))
 
     printf "\n"
 
