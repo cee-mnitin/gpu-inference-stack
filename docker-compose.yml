@@ -735,6 +735,9 @@ services:
       - ./config/litellm:/app/config
     environment:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-1234567890abcdef}
+      # UI credentials — set via `make set-passwd`, stored encrypted in .env.secrets
+      - UI_USERNAME=${UI_USERNAME:-admin}
+      - UI_PASSWORD=${UI_PASSWORD:-}
       - DATABASE_URL=postgresql://litellm:litellm@postgres:5432/litellm
       - STORE_MODEL_IN_DB=True
       - LITELLM_DROP_PARAMS=${LITELLM_DROP_PARAMS:-true}

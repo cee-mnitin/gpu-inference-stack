@@ -52,6 +52,22 @@ SOPS will:
 
 ## Available Secrets
 
+### UI_USERNAME / UI_PASSWORD
+
+LiteLLM admin UI credentials. Set via:
+
+```bash
+make set-passwd
+```
+
+This prompts for a username (default: `admin`) and password, then stores them
+encrypted in `.env.secrets`. The credentials are loaded automatically when
+`scripts/dc.sh` runs, passed to the litellm container as `UI_USERNAME` and
+`UI_PASSWORD`.
+
+- **Default username**: `admin`
+- **Default password**: (none — falls back to master key if unset)
+
 ### GPU_CRIMSON_LLM2_KEY
 
 API key for the crimson-llm2 GPU server.

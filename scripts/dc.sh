@@ -24,6 +24,21 @@ if ! profile_assert_resolvable >/dev/null; then
     exit 1
 fi
 
+# Load SOPS-encrypted secrets (UI_USERNAME, UI_PASSWORD, API keys) into the
+# environment. The secrets are decrypted in-memory and never written to disk.
+# If .env.secrets or .age-key.txt is missing, this is a no-op — secrets are
+# optional for basic operation.
+if [ -f "$PROJECT_ROOT/.env.secrets" ] && [ -f "$PROJECT_ROOT/.age-key.txt" ]; then
+    if command -v sops >/dev/null 2>&1; then
+        export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/.age-key.txt"
+        while IFS='=' read -r key val; do
+            [ -n "$key" ] || continue
+            # Only export if not already set (caller's env wins)
+            [ -z "${!key+x}" ] && export "$key=$val"
+        done < <(sops -d "$PROJECT_ROOT/.env.secrets" 2>/dev/null | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' || true)
+    fi
+fi
+
 # Unquoted on purpose: profile_env_file_args emits separate --env-file words.
 # shellcheck disable=SC2046
 exec docker compose $(profile_env_file_args) -f "$PROJECT_ROOT/docker-compose.yml" "$@"

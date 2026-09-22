@@ -45,7 +45,7 @@ $(shell set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f";
 endef
 
 .PHONY: help setup start stop restart status logs health models urls \
-        check pull build clean versions model-store watchdog _require_profile
+        check pull build clean versions model-store watchdog set-passwd create-key _require_profile
 
 help:
 	@printf "$(BOLD)gpu-inference-stack$(RST)\n\n"
@@ -60,6 +60,8 @@ help:
 	@printf "  make versions configured vs running images\n"
 	@printf "  $(BOLD)make model-store$(RST) shared NAS checkpoint store $(DIM)(ARGS=sync|list|status)$(RST)\n"
 	@printf "  $(BOLD)make watchdog$(RST)     install/enable the host watchdog timer + lingering\n"
+	@printf "  $(BOLD)make set-passwd$(RST)   set LiteLLM UI credentials $(DIM)(stored encrypted in .env.secrets)$(RST)\n"
+	@printf "  $(BOLD)make create-key$(RST)   generate a virtual API key for a consumer app\n"
 	@printf "  $(DIM)make clean    also removes volumes (keys, dashboards) — asks first$(RST)\n\n"
 	@printf "  $(DIM)Override detection:  make setup PROFILE=85$(RST)\n"
 	@printf "  $(DIM)AUTO=1       take the default answer to every prompt$(RST)\n"
@@ -153,6 +155,99 @@ watchdog:
 ##   need a checkpoint is the only one that downloads it.
 model-store: _require_profile
 	@./scripts/model-store.sh $(or $(ARGS),status)
+
+# ---------------------------------------------------------------------------
+## set-passwd: set LiteLLM UI credentials in SOPS-encrypted .env.secrets
+##   Prompts for username (default: admin) and password, then encrypts them.
+##   The litellm container reads UI_USERNAME and UI_PASSWORD from here.
+set-passwd:
+	@if [ ! -f .age-key.txt ]; then \
+	  printf "$(RED)No .age-key.txt found.$(RST) See docs/SECRETS.md for setup.\n"; exit 1; fi
+	@printf "$(BOLD)Set LiteLLM UI credentials$(RST)\n\n"
+	@printf "  These are stored encrypted in .env.secrets and passed to the\n"
+	@printf "  litellm container as UI_USERNAME and UI_PASSWORD.\n\n"
+	@read -r -p "  Username [admin]: " user; user="$${user:-admin}"; \
+	 printf "  Password: "; stty -echo; read -r pass; stty echo; printf "\n"; \
+	 if [ -z "$$pass" ]; then printf "  $(RED)Password cannot be empty.$(RST)\n"; exit 1; fi; \
+	 export SOPS_AGE_KEY_FILE="$$(pwd)/.age-key.txt"; \
+	 plain=$$(sops -d .env.secrets 2>/dev/null || echo ""); \
+	 plain=$$(printf '%s\n' "$$plain" | grep -v '^UI_USERNAME=' | grep -v '^UI_PASSWORD=' | grep -v '^$$'); \
+	 printf '%s\n\n# LiteLLM UI credentials\nUI_USERNAME=%s\nUI_PASSWORD=%s\n' "$$plain" "$$user" "$$pass" > .env.secrets.plain; \
+	 sops -e .env.secrets.plain > .env.secrets; \
+	 rm -f .env.secrets.plain; \
+	 printf "\n  $(GRN)✓$(RST) Credentials saved to .env.secrets\n"; \
+	 printf "  $(DIM)Run 'make restart' to apply changes.$(RST)\n"
+
+# ---------------------------------------------------------------------------
+## create-key: generate a LiteLLM virtual API key for a consumer application
+##   Prompts for key alias and model access, confirms, then creates the key.
+##   The generated key is what consumers use to authenticate with the gateway.
+create-key: _require_profile
+	@set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f"; done; set +a; \
+	 port="$${LITELLM_PORT:-8080}"; \
+	 master="$${LITELLM_MASTER_KEY:-sk-1234567890abcdef}"; \
+	 host="127.0.0.1"; \
+	 printf "$(BOLD)Create LiteLLM Virtual API Key$(RST)\n\n"; \
+	 printf "  This generates an API key for a consumer application.\n"; \
+	 printf "  The key grants access to specific models through the gateway.\n\n"; \
+	 printf "$(BOLD)Available contract models:$(RST)\n"; \
+	 printf "  $(DIM)1$(RST) gpu/chat/interactive  $(DIM)— tool-calling, >=32k ctx, JSON mode$(RST)\n"; \
+	 printf "  $(DIM)2$(RST) gpu/chat/bulk         $(DIM)— tool-calling, >=32k ctx, JSON mode$(RST)\n"; \
+	 printf "  $(DIM)3$(RST) gpu/chat/fast         $(DIM)— tool-calling, >=16k ctx, low latency$(RST)\n"; \
+	 printf "  $(DIM)4$(RST) gpu/chat/vision       $(DIM)— image input (if available)$(RST)\n"; \
+	 printf "  $(DIM)5$(RST) gpu/embed/bge-m3      $(DIM)— embeddings, 1024-dim$(RST)\n"; \
+	 printf "  $(DIM)6$(RST) gpu/rerank/bge-reranker-v2-m3 $(DIM)— cross-encoder reranking$(RST)\n"; \
+	 printf "\n"; \
+	 read -r -p "  Key alias (e.g. myapp, backend-prod): " alias; \
+	 if [ -z "$$alias" ]; then printf "  $(RED)Alias cannot be empty.$(RST)\n"; exit 1; fi; \
+	 printf "\n  Which models? Enter numbers separated by spaces, or:\n"; \
+	 printf "    $(DIM)chat$(RST)  = 1 2 3 (all chat models)\n"; \
+	 printf "    $(DIM)all$(RST)   = 1 2 3 4 5 6 (everything)\n"; \
+	 printf "    $(DIM)Enter$(RST) = 1 2 3 (default: chat models)\n\n"; \
+	 read -r -p "  Models [chat]: " model_input; \
+	 model_input="$${model_input:-chat}"; \
+	 models=""; \
+	 case "$$model_input" in \
+	   chat) models='["gpu/chat/interactive","gpu/chat/bulk","gpu/chat/fast"]';; \
+	   all)  models='["gpu/chat/interactive","gpu/chat/bulk","gpu/chat/fast","gpu/chat/vision","gpu/embed/bge-m3","gpu/rerank/bge-reranker-v2-m3"]';; \
+	   *) \
+	     for n in $$model_input; do \
+	       case "$$n" in \
+	         1) models="$$models\"gpu/chat/interactive\",";; \
+	         2) models="$$models\"gpu/chat/bulk\",";; \
+	         3) models="$$models\"gpu/chat/fast\",";; \
+	         4) models="$$models\"gpu/chat/vision\",";; \
+	         5) models="$$models\"gpu/embed/bge-m3\",";; \
+	         6) models="$$models\"gpu/rerank/bge-reranker-v2-m3\",";; \
+	         *) printf "  $(YEL)Unknown model number: $$n$(RST)\n";; \
+	       esac; \
+	     done; \
+	     models="[$${models%,}]";; \
+	 esac; \
+	 if [ "$$models" = "[]" ]; then printf "  $(RED)No valid models selected.$(RST)\n"; exit 1; fi; \
+	 printf "\n$(BOLD)Summary$(RST)\n"; \
+	 printf "  Alias:  $(BOLD)%s$(RST)\n" "$$alias"; \
+	 printf "  Models: %s\n" "$$models"; \
+	 printf "\n"; \
+	 read -r -p "  Create this key? [Y/n] " confirm; \
+	 case "$$confirm" in ""|y|Y|yes|YES) ;; *) printf "  Aborted.\n"; exit 0;; esac; \
+	 printf "\n  Creating key...\n"; \
+	 resp=$$(curl -s -X POST "http://$$host:$$port/key/generate" \
+	   -H "Authorization: Bearer $$master" \
+	   -H "Content-Type: application/json" \
+	   -d "{\"key_alias\":\"$$alias\",\"models\":$$models}" 2>&1); \
+	 if printf '%s' "$$resp" | grep -q '"key"'; then \
+	   key=$$(printf '%s' "$$resp" | sed -n 's/.*"key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'); \
+	   printf "\n  $(GRN)$(BOLD)✓ Key created successfully$(RST)\n\n"; \
+	   printf "  $(BOLD)API Key:$(RST) %s\n\n" "$$key"; \
+	   printf "  $(DIM)Store this key securely — it cannot be retrieved later.$(RST)\n"; \
+	   printf "  $(DIM)Consumers use it as: Authorization: Bearer %s$(RST)\n" "$$key"; \
+	 else \
+	   printf "\n  $(RED)✗ Failed to create key$(RST)\n"; \
+	   printf "  %s\n" "$$resp"; \
+	   printf "\n  $(DIM)Is the gateway running? Try: make status$(RST)\n"; \
+	   exit 1; \
+	 fi
 
 # ---------------------------------------------------------------------------
 check: _require_profile
