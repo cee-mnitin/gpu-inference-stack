@@ -24,6 +24,26 @@ get_compose_project() {
     basename "$(pwd)"
 }
 
+# Helper: Get ports needed by active profile
+get_required_ports() {
+    # Source profile files to get port configuration
+    local ports=""
+
+    # Always check LiteLLM and base services
+    ports="${LITELLM_PORT:-8080} ${REDIS_PORT:-6379} ${PROMETHEUS_PORT:-9090} ${GRAFANA_PORT:-3000}"
+
+    # Check enabled services from environment
+    [ "${ENABLE_VLLM:-false}" = "true" ] && ports="$ports ${VLLM_PORT:-8000}"
+    [ "${ENABLE_VLLM2:-false}" = "true" ] && ports="$ports ${VLLM2_PORT:-8010}"
+    [ "${ENABLE_VLLM3:-false}" = "true" ] && ports="$ports ${VLLM3_PORT:-8011}"
+    [ "${ENABLE_OLLAMA:-false}" = "true" ] && ports="$ports ${OLLAMA_PORT:-11434}"
+    [ "${ENABLE_LLAMACPP:-false}" = "true" ] && ports="$ports ${LLAMACPP_PORT:-8083}"
+    [ "${ENABLE_INFINITY:-false}" = "true" ] && ports="$ports ${INFINITY_PORT:-7997}"
+    [ "${ENABLE_EMBEDDINGS:-false}" = "true" ] && ports="$ports ${EMBEDDINGS_PORT:-8082}"
+
+    echo "$ports" | tr ' ' '\n' | sort -u | tr '\n' ' '
+}
+
 # Check 1: Docker daemon responsive
 check_docker_daemon() {
     if timeout 5 docker info >/dev/null 2>&1; then
@@ -122,6 +142,82 @@ check_container_conflicts() {
     return 0
 }
 
+# Check 5: Port conflicts (CONDITIONAL AUTO-FIX)
+check_port_conflicts() {
+    # Source profile to get ENABLE_* flags
+    set -a
+    for f in $(./scripts/profile-files.sh 2>/dev/null); do
+        [ -f "$f" ] && . "$f"
+    done
+    set +a
+
+    local ports
+    ports=$(get_required_ports)
+
+    local conflicts=0
+    local checked=0
+
+    for port in $ports; do
+        [ -z "$port" ] && continue
+        checked=$((checked + 1))
+
+        # Use ss (preferred) or fall back to lsof
+        local listening
+        if command -v ss >/dev/null 2>&1; then
+            listening=$(ss -tlnp 2>/dev/null | grep ":$port " | head -1 || true)
+        elif command -v lsof >/dev/null 2>&1; then
+            listening=$(lsof -i ":$port" -sTCP:LISTEN 2>/dev/null | grep -v PID | head -1 || true)
+        else
+            printf "  ${YEL}!${RST} Port check skipped (neither ss nor lsof available)\n"
+            return 1
+        fi
+
+        if [ -z "$listening" ]; then
+            continue
+        fi
+
+        # Port is in use - check if it's our old container
+        local container_using
+        container_using=$(docker ps --format '{{.Names}}' --filter "publish=$port" 2>/dev/null | head -1 || true)
+
+        if [ -n "$container_using" ]; then
+            # Our container is using it
+            printf "  ${YEL}⚠${RST} Port conflict: $port in use by $container_using (old container)\n"
+
+            if [ "$NO_AUTOFIX" = "1" ]; then
+                printf "    ${DIM}Would stop (PREFLIGHT_NO_AUTOFIX=1): docker stop $container_using${RST}\n"
+                conflicts=$((conflicts + 1))
+            else
+                printf "  ${DIM}→${RST} Stopping old container... "
+                if docker stop "$container_using" >/dev/null 2>&1; then
+                    printf "done\n"
+                else
+                    printf "failed\n"
+                    conflicts=$((conflicts + 1))
+                fi
+            fi
+        else
+            # External process
+            printf "  ${RED}✗${RST} Port conflict: $port in use by external process\n"
+            printf "    ${DIM}Check with: sudo lsof -i :$port${RST}\n"
+            printf "    ${DIM}Or change port in .env (e.g., LITELLM_PORT=$((port+1)))${RST}\n"
+            conflicts=$((conflicts + 1))
+        fi
+    done
+
+    if [ "$checked" -eq 0 ]; then
+        printf "  ${DIM}○${RST} Port check skipped (no ports configured)\n"
+        return 0
+    fi
+
+    if [ "$conflicts" -gt 0 ]; then
+        return 2
+    fi
+
+    printf "  ${GRN}✓${RST} Ports available ($checked checked)\n"
+    return 0
+}
+
 main() {
     printf "Running pre-flight checks...\n\n"
 
@@ -137,6 +233,7 @@ main() {
 
     # Tier 1 - Conflicts (auto-fix)
     check_container_conflicts || errors=$((errors + 1))
+    check_port_conflicts || errors=$((errors + 1))
 
     printf "\n"
 
