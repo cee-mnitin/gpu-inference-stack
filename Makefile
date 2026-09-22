@@ -193,7 +193,7 @@ create-key: _require_profile
 	@set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f"; done; set +a; \
 	 port="$${LITELLM_PORT:-8080}"; \
 	 master="$${LITELLM_MASTER_KEY:-sk-1234567890abcdef}"; \
-	 host="127.0.0.1"; \
+	 host="$${LITELLM_BIND_ADDR:-127.0.0.1}"; [ "$$host" = "0.0.0.0" ] && host="127.0.0.1"; \
 	 printf "$(BOLD)Create LiteLLM Virtual API Key$(RST)\n\n"; \
 	 printf "  This generates an API key for a consumer application.\n"; \
 	 printf "  The key grants access to specific models through the gateway.\n\n"; \
@@ -340,7 +340,8 @@ models: _require_profile
 	printf "$(BOLD)Serving$(RST)\n"; \
 	key="$${LITELLM_MASTER_KEY:-sk-1234567890abcdef}"; \
 	port="$${LITELLM_PORT:-8080}"; \
-	out=$$(curl -s -m 10 -H "Authorization: Bearer $$key" "http://127.0.0.1:$$port/v1/models" 2>/dev/null); \
+	host="$${LITELLM_BIND_ADDR:-127.0.0.1}"; [ "$$host" = "0.0.0.0" ] && host="127.0.0.1"; \
+	out=$$(curl -s -m 10 -H "Authorization: Bearer $$key" "http://$$host:$$port/v1/models" 2>/dev/null); \
 	if [ -z "$$out" ] || printf '%s' "$$out" | grep -q '"error"'; then \
 	  printf "  $(YEL)gateway not answering on :%s yet$(RST)\n" "$$port"; \
 	else \
