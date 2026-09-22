@@ -218,6 +218,139 @@ check_port_conflicts() {
     return 0
 }
 
+# Check 6: Docker Compose version
+check_compose_version() {
+    if ! command -v docker >/dev/null 2>&1; then
+        printf "  ${RED}✗${RST} docker command not found\n"
+        return 2
+    fi
+
+    local version
+    if ! version=$(docker compose version --short 2>/dev/null); then
+        printf "  ${YEL}!${RST} Could not determine Docker Compose version\n"
+        return 1
+    fi
+
+    local major minor
+    major=$(echo "$version" | cut -d. -f1)
+    minor=$(echo "$version" | cut -d. -f2)
+
+    if [ "$major" -ge 2 ]; then
+        printf "  ${GRN}✓${RST} Docker Compose ${version}\n"
+        return 0
+    else
+        printf "  ${YEL}!${RST} Docker Compose ${version} is old (recommend 2.0+)\n"
+        printf "    ${DIM}Install: https://docs.docker.com/compose/install/${RST}\n"
+        return 1
+    fi
+}
+
+# Check 7: Volume mount paths exist (AUTO-CREATE)
+check_volume_paths() {
+    # Source profile to get volume path variables
+    set -a
+    for f in $(./scripts/profile-files.sh 2>/dev/null); do
+        [ -f "$f" ] && . "$f"
+    done
+    set +a
+
+    local paths=(
+        "${VLLM_CACHE_DIR:-./data/vllm/cache}"
+        "${HF_HOME:-./data/huggingface}"
+        "${OLLAMA_MODELS_DIR:-./data/ollama/models}"
+        "${LLAMACPP_MODELS_DIR:-./data/llamacpp/models}"
+        "./data/postgres"
+        "./config/litellm"
+        "./config/prometheus"
+        "./config/grafana/provisioning"
+        "./config/grafana/dashboards"
+    )
+
+    local created=0
+
+    for path in "${paths[@]}"; do
+        if [ ! -d "$path" ]; then
+            if [ "$NO_AUTOFIX" = "1" ]; then
+                printf "  ${YEL}⚠${RST} Missing directory: $path\n"
+                printf "    ${DIM}Would create (PREFLIGHT_NO_AUTOFIX=1)${RST}\n"
+            else
+                mkdir -p "$path"
+                printf "  ${DIM}→${RST} Created directory: $path\n"
+                created=$((created + 1))
+            fi
+        fi
+    done
+
+    if [ "$created" -eq 0 ] && [ "$NO_AUTOFIX" != "1" ]; then
+        printf "  ${GRN}✓${RST} Volume paths exist\n"
+    fi
+
+    return 0
+}
+
+# Check 8: Network conflicts (AUTO-FIX)
+check_network_conflicts() {
+    local network_name="${NETWORK_NAME:-gpu-inference-net}"
+
+    if ! docker network inspect "$network_name" >/dev/null 2>&1; then
+        printf "  ${GRN}✓${RST} Network will be created\n"
+        return 0
+    fi
+
+    # Check if any running containers are using it
+    local containers_using
+    containers_using=$(docker network inspect "$network_name" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | xargs)
+
+    if [ -z "$containers_using" ]; then
+        # Network exists but unused - remove it so compose can recreate with correct settings
+        printf "  ${YEL}⚠${RST} Stale network found: $network_name\n"
+
+        if [ "$NO_AUTOFIX" = "1" ]; then
+            printf "    ${DIM}Would remove (PREFLIGHT_NO_AUTOFIX=1): docker network rm $network_name${RST}\n"
+        else
+            printf "  ${DIM}→${RST} Removing stale network... "
+            if docker network rm "$network_name" >/dev/null 2>&1; then
+                printf "done\n"
+            else
+                printf "failed\n"
+                return 1
+            fi
+        fi
+    else
+        printf "  ${GRN}✓${RST} Network exists (used by: ${containers_using})\n"
+    fi
+
+    return 0
+}
+
+# Check 9: Required images available (INFO ONLY)
+check_images_available() {
+    # This is informational - compose will pull missing images
+    # Just note if large images need pulling
+
+    local images=(
+        "${VLLM_IMAGE:-vllm/vllm-openai:v0.23.0}"
+        "ghcr.io/berriai/litellm:main-latest"
+    )
+
+    local missing=()
+
+    for image in "${images[@]}"; do
+        if ! docker images -q "$image" 2>/dev/null | grep -q .; then
+            missing+=("$image")
+        fi
+    done
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        printf "  ${DIM}ℹ${RST} Will pull missing images:\n"
+        for img in "${missing[@]}"; do
+            printf "    ${DIM}$img${RST}\n"
+        done
+    fi
+
+    return 0
+}
+
 main() {
     printf "Running pre-flight checks...\n\n"
 
@@ -226,6 +359,7 @@ main() {
 
     # Tier 2 - Critical
     check_docker_daemon || errors=$((errors + 1))
+    check_compose_version || warnings=$((warnings + 1))
 
     # Tier 2 - Resources
     check_gpu_availability || warnings=$((warnings + 1))
@@ -234,6 +368,11 @@ main() {
     # Tier 1 - Conflicts (auto-fix)
     check_container_conflicts || errors=$((errors + 1))
     check_port_conflicts || errors=$((errors + 1))
+
+    # Tier 3 - Nice to have
+    check_volume_paths || warnings=$((warnings + 1))
+    check_network_conflicts || warnings=$((warnings + 1))
+    check_images_available || true  # Info only
 
     printf "\n"
 
