@@ -18,14 +18,27 @@ NO_AUTOFIX=${PREFLIGHT_NO_AUTOFIX:-0}
 AUTO=${AUTO:-0}
 
 # Return codes: 0=pass, 1=warning, 2=critical error
+
+# Check 1: Docker daemon responsive
+check_docker_daemon() {
+    if timeout 5 docker info >/dev/null 2>&1; then
+        printf "  ${GRN}✓${RST} Docker daemon responsive\n"
+        return 0
+    else
+        printf "  ${RED}✗${RST} Docker daemon not responding (timeout after 5s)\n"
+        printf "    ${DIM}Is Docker running? Try: sudo systemctl start docker${RST}\n"
+        return 2
+    fi
+}
+
 main() {
     printf "Running pre-flight checks...\n\n"
 
     local warnings=0
     local errors=0
 
-    # Placeholder for checks
-    printf "  ${GRN}✓${RST} Checks not yet implemented\n"
+    # Tier 2 - Critical
+    check_docker_daemon || ((errors++))
 
     printf "\n"
 
