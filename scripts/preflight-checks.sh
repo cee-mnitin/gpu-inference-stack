@@ -38,7 +38,7 @@ main() {
     local errors=0
 
     # Tier 2 - Critical
-    check_docker_daemon || ((errors++))
+    check_docker_daemon || errors=$((errors + 1))
 
     printf "\n"
 
