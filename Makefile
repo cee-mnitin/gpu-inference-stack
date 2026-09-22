@@ -37,6 +37,13 @@ $(shell set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f";
   [ "$${ENABLE_VLLM:-false}"       = "true" ] && p="$$p --profile vllm"; \
   [ "$${ENABLE_VLLM2:-false}"      = "true" ] && p="$$p --profile vllm2"; \
   [ "$${ENABLE_VLLM3:-false}"      = "true" ] && p="$$p --profile vllm3"; \
+  if [ "$${ENABLE_VLLM:-false}" = "true" ]; then \
+    _router="$${ENABLE_VLLM_ROUTER:-true}"; \
+    if [ "$${ENABLE_VLLM2:-false}" = "true" ] || [ "$${ENABLE_VLLM3:-false}" = "true" ]; then \
+      _router=true; \
+    fi; \
+    [ "$$_router" = "true" ] && p="$$p --profile vllm-router"; \
+  fi; \
   [ "$${ENABLE_LLAMACPP:-false}"   = "true" ] && p="$$p --profile llamacpp"; \
   [ "$${ENABLE_OLLAMA:-false}"     = "true" ] && p="$$p --profile ollama"; \
   [ "$${ENABLE_INFINITY:-false}"   = "true" ] && p="$$p --profile infinity"; \
