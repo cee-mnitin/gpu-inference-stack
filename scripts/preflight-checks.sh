@@ -64,7 +64,7 @@ get_required_ports() {
     local ports=""
 
     # Always check LiteLLM and base services
-    ports="${LITELLM_PORT:-8080} ${REDIS_PORT:-6379} ${PROMETHEUS_PORT:-9090} ${GRAFANA_PORT:-3000}"
+    ports="${LITELLM_PORT:-8080} ${REDIS_PORT:-6390} ${PROMETHEUS_PORT:-9090} ${GRAFANA_PORT:-3000}"
 
     # Check enabled services from environment
     [ "${ENABLE_VLLM:-false}" = "true" ] && ports="$ports ${VLLM_PORT:-8000}"
@@ -76,6 +76,16 @@ get_required_ports() {
     [ "${ENABLE_EMBEDDINGS:-false}" = "true" ] && ports="$ports ${EMBEDDINGS_PORT:-8082}"
 
     echo "$ports" | tr ' ' '\n' | sort -u | tr '\n' ' '
+}
+
+# Helper: Name the variable that sets a required port, for the refusal message
+port_var_for() {
+    local v
+    for v in LITELLM_PORT REDIS_PORT PROMETHEUS_PORT GRAFANA_PORT VLLM_PORT VLLM2_PORT \
+             VLLM3_PORT OLLAMA_PORT LLAMACPP_PORT INFINITY_PORT EMBEDDINGS_PORT; do
+        if [ "${!v:-}" = "$1" ]; then echo "$v"; return 0; fi
+    done
+    echo "<the *_PORT set to $1>"
 }
 
 # Check 1: Docker daemon responsive
@@ -140,28 +150,31 @@ check_container_conflicts() {
 
     # Find containers matching our names that aren't part of our compose project
     local conflicts
-    conflicts=$(docker ps -a --format '{{.Names}}\t{{.ID}}\t{{.Label "com.docker.compose.project"}}\t{{.CreatedAt}}' \
-        | grep -E "^($our_containers)\s" \
-        | grep -v "$project" \
-        | awk '{print $1 "\t" $2 "\t" $4 " " $5 " " $6}' || true)
+    conflicts=$(docker ps -a --format '{{.Names}}\t{{.ID}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.CreatedAt}}' \
+        | awk -F'\t' -v names="^($our_containers)$" -v proj="$project" '$1 ~ names && $3 != proj' || true)
 
     if [ -z "$conflicts" ]; then
         printf "  ${GRN}✓${RST} No container name conflicts\n"
         return 0
     fi
 
-    # Auto-fix: remove conflicting containers
-    local fixed=0
-    while IFS=$'\t' read -r name id created; do
+    # Auto-fix ONLY a leftover of this checkout (same compose working dir under
+    # an older project name). The names above are generic — `redis`,
+    # `grafana` — so a same-named container from another stack is refused,
+    # never removed.
+    local foreign=0
+    while IFS=$'\t' read -r name id owner workdir created; do
         printf "  ${YEL}⚠${RST} Container name conflict: ${name} (${id:0:8}, created ${created})\n"
 
-        if [ "$NO_AUTOFIX" = "1" ]; then
+        if [ "$workdir" != "$PWD" ]; then
+            printf "    ${RED}✗${RST} belongs to ${owner:-no compose project} (${workdir:-unknown dir}) — not ours, not removed\n"
+            foreign=$((foreign + 1))
+        elif [ "$NO_AUTOFIX" = "1" ]; then
             printf "    ${DIM}Would remove (PREFLIGHT_NO_AUTOFIX=1): docker rm -f ${name}${RST}\n"
         else
             printf "  ${DIM}→${RST} Removing conflicting container... "
             if docker rm -f "$name" >/dev/null 2>&1; then
                 printf "done\n"
-                fixed=$((fixed + 1))
             else
                 printf "failed\n"
                 return 2
@@ -169,7 +182,7 @@ check_container_conflicts() {
         fi
     done <<< "$conflicts"
 
-    if [ "$NO_AUTOFIX" = "1" ]; then
+    if [ "$foreign" -gt 0 ] || [ "$NO_AUTOFIX" = "1" ]; then
         return 2
     fi
 
@@ -210,11 +223,28 @@ check_port_conflicts() {
             continue
         fi
 
-        # Port is in use - check if it's our old container
-        local container_using
-        container_using=$(docker ps --format '{{.Names}}' --filter "publish=$port" 2>/dev/null | head -1 || true)
+        # Port is in use - find the container publishing it on the HOST side
+        # (`addr:PORT->`). `--filter publish=` was not enough: it cannot tell
+        # whose container it is, and on 2026-09-24 this stopped
+        # platform-falkordb (deepdarshak's graph) as if it were ours.
+        local holder container_using="" holder_project=""
+        holder=$(docker ps --format '{{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Ports}}' 2>/dev/null \
+            | awk -F'\t' -v p=":$port->" 'index($3, p) {print $1 "\t" $2; exit}' || true)
+        if [ -n "$holder" ]; then
+            container_using=${holder%%$'\t'*}
+            holder_project=${holder#*$'\t'}
+        fi
 
-        if [ -n "$container_using" ]; then
+        if [ -n "$container_using" ] && [ "$holder_project" != "$(get_compose_project)" ]; then
+            # Another stack's container. Never stop it — refuse and say who.
+            show_error_box \
+                "Pre-flight check failed: Port conflict" \
+                "Port $port is held by container $container_using
+  (project: ${holder_project:-none}) — not ours, not touched." \
+                "Move our port in the server profile or .env:
+   $(port_var_for "$port")=<free port>"
+            conflicts=$((conflicts + 1))
+        elif [ -n "$container_using" ]; then
             # Our container is using it
             printf "  ${YEL}⚠${RST} Port conflict: $port in use by $container_using (old container)\n"
 
@@ -439,4 +469,7 @@ main() {
     fi
 }
 
-main "$@"
+# Run only when executed, so the tests can source the checks one at a time.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

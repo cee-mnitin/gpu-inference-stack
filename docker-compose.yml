@@ -662,7 +662,13 @@ services:
     container_name: redis
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      # Loopback and off 6379 by default. 6379 is FalkorDB's port — it speaks
+      # RESP too — and deepdarshak/ember publish their graph there on the boxes
+      # this stack shares. Nothing needs this redis from the host: LiteLLM and
+      # redis-exporter reach it as redis:6379 on gpu-inference-net, and it has
+      # no password. On 2026-09-24 the 6379 clash (plus a preflight that
+      # stopped the holder) took ddai4's knowledge graph down.
+      - "${REDIS_BIND_ADDR:-127.0.0.1}:${REDIS_PORT:-6390}:6379"
     volumes:
       - redis-data:/data
     command: >
