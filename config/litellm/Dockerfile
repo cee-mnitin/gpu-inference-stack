@@ -13,10 +13,11 @@
 # OpenAI-compatible backends), so a vLLM-backed vision role would not hit it.
 #
 # Keep the base tag in sync with docker-compose.yml's litellm image.
-FROM ghcr.io/berriai/litellm:main-latest
+ARG LITELLM_BASE_IMAGE=ghcr.io/berriai/litellm@sha256:1a9625b107f09f80f312ffaa3c7f7f3c0b2bf59a49ed0d5b8c3e90edcc30bb90
+FROM ${LITELLM_BASE_IMAGE}
 
 # Neither pip nor uv is present in the base image's runtime layer — only the
 # venv's interpreter. ensurepip bootstraps pip into that same interpreter, so
 # Pillow lands where litellm will actually import it from.
 RUN python3 -m ensurepip --default-pip \
-    && python3 -m pip install --no-cache-dir Pillow
+    && python3 -m pip install --no-cache-dir Pillow==12.3.0

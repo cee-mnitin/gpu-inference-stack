@@ -52,27 +52,39 @@ log() { printf '%s watchdog: %s\n' "$(date -Is)" "$*"; }
 
 # Only this project's containers: the host runs other stacks, and restarting
 # somebody else's unhealthy container is not this script's business.
-mapfile -t unhealthy < <(
-    docker ps --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-gpu-inference-stack}" \
-              --filter "health=unhealthy" --format '{{.Names}}' 2>/dev/null
-)
-
-if [ "${#unhealthy[@]}" -eq 0 ]; then
-    # Clear every streak: nothing is unhealthy, so no partial streak should
-    # survive to combine with a future unrelated blip.
-    rm -f "$STATE_DIR"/streak.* 2>/dev/null
-    exit 0
+# One writer, including timer/manual overlap. A failed inventory is not health.
+exec 9>"$STATE_DIR/lock"
+flock -n 9 || exit 0
+if ! inventory=$(docker ps --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-gpu-inference-stack}" \
+    --filter "health=unhealthy" --format '{{.ID}} {{.Names}}' 2>/dev/null); then
+    log "Docker inventory failed — preserving state, no restarts"
+    exit 1
 fi
 
-for name in "${unhealthy[@]}"; do
-    [ -n "$name" ] || continue
-    streak_file="$STATE_DIR/streak.$name"
-    last_file="$STATE_DIR/last_restart.$name"
+declare -A unhealthy=()
+while read -r id name; do
+    [ -n "$id" ] || continue
+    unhealthy["$id"]="$name"
+done <<< "$inventory"
+
+# A recovered/replaced container loses its streak even if others remain sick.
+if [ "$DRY_RUN" -eq 0 ]; then
+    for file in "$STATE_DIR"/streak.*; do
+        [ -f "$file" ] || continue
+        id="${file##*/streak.}"
+        [ -n "${unhealthy[$id]+present}" ] || rm -f -- "$file"
+    done
+fi
+
+for id in "${!unhealthy[@]}"; do
+    name="${unhealthy[$id]}"
+    streak_file="$STATE_DIR/streak.$id"
+    last_file="$STATE_DIR/last_restart.$id"
 
     streak=$(cat "$streak_file" 2>/dev/null || echo 0)
     [[ "$streak" =~ ^[0-9]+$ ]] || streak=0
     streak=$((streak + 1))
-    echo "$streak" > "$streak_file"
+    [ "$DRY_RUN" -eq 1 ] || echo "$streak" > "$streak_file"
 
     if [ "$streak" -lt "$THRESHOLD" ]; then
         log "$name unhealthy ($streak/$THRESHOLD) — waiting"
@@ -93,7 +105,7 @@ for name in "${unhealthy[@]}"; do
     fi
 
     log "$name unhealthy for $streak consecutive checks — restarting"
-    if docker restart "$name" >/dev/null 2>&1; then
+    if docker restart "$id" >/dev/null 2>&1; then
         echo "$now" > "$last_file"
         rm -f "$streak_file"
         log "$name restarted"

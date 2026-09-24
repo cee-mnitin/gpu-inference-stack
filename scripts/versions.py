@@ -46,14 +46,24 @@ def main() -> int:
         print("  (no services in the rendered config)")
         return 0
 
-    print("  %-16s %-46s %s" % ("SERVICE", "CONFIGURED", "RUNNING"))
+    print("  %-16s %-46s %s" % ("SERVICE", "CONFIGURED", "RUNNING / IMAGE ID"))
     drift = []
     for name, spec in sorted(services.items()):
         configured = spec.get("image", "-")
         got = running_image(spec.get("container_name") or name)
-        mark = " " if got in ("-", configured) else "!"
-        print("  %-16s %-46s %s %s" % (name, configured, got, mark))
-        if got not in ("-", configured):
+        container = spec.get("container_name") or name
+        running_id = subprocess.run(
+            ["docker", "inspect", "-f", "{{.Image}}", container],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        configured_id = subprocess.run(
+            ["docker", "image", "inspect", "-f", "{{.Id}}", configured],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        changed = got not in ("-", configured) or bool(running_id and configured_id and running_id != configured_id)
+        mark = "!" if changed else " "
+        print("  %-16s %-46s %s %s %s" % (name, configured, got, running_id or "(not running)", mark))
+        if changed:
             drift.append(name)
 
     print()
@@ -61,7 +71,7 @@ def main() -> int:
         print("  ! running a different image than configured: " + " ".join(drift))
         print("    `make start` recreates those containers.")
     else:
-        print("  OK — every running container matches its configured image")
+        print("  OK — references match; image IDs compared where the configured image is locally available")
     return 0
 
 

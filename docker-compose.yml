@@ -59,16 +59,13 @@ x-vllm-instance: &vllm-instance
   networks:
     - gpu-inference-net
   healthcheck:
-    # A one-token completion, not /health: vLLM's /health answers from the API
+    # A short inference completion, not /health: vLLM's /health answers from the API
     # server process, so it reports fine while the engine core is wedged or
     # dead — the same blind spot that hid an 11-minute Infinity outage on
     # 2026-09-12 behind a green container.
     #
-    # The probe kills PID 1 after --threshold consecutive failures so the
-    # restart policy replaces the container; `restart: unless-stopped` alone
-    # never acts on health. THRESHOLD is deliberately reluctant: an engine
-    # under load is slow, not hung, and restarting a busy vLLM costs minutes of
-    # model load.
+    # The probe reports readiness only. The host watchdog owns consecutive
+    # failure streaks and restarts; Docker restart policy alone ignores health.
     test: ["CMD-SHELL", "python3 /healthprobe.py --url http://localhost:8000/v1/chat/completions --kind chat --model $${GIS_MODEL_NAME} --timeout ${HEALTHPROBE_TIMEOUT:-20} --threshold ${HEALTHPROBE_THRESHOLD:-5}"]
     interval: 30s
     timeout: 25s
@@ -85,13 +82,13 @@ services:
   # OLLAMA - Local LLM Server
   # ============================================================================
   ollama:
-    image: ollama/ollama:latest
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.32.2@sha256:c3886c198155aa7d45a29851100cc16f5d6ea6777d635ddd0597fe95874161af}
     container_name: ollama
     profiles:
       - ollama
     restart: unless-stopped
     ports:
-      - "${OLLAMA_PORT:-11434}:11434"
+      - "${OLLAMA_BIND_ADDR:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama-data:/root/.ollama
       - ${OLLAMA_MODELS_DIR:-./data/ollama/models}:/models
@@ -144,20 +141,10 @@ services:
     <<: *vllm-instance
     container_name: vllm-new
     profiles: [vllm]
-    # EXPOSURE IS A CHOICE. VLLM_BIND_ADDR decides who can reach this engine
-    # directly, bypassing the gateway:
-    #   0.0.0.0    (default) reachable from other hosts — needed where a legacy
-    #              consumer dials the engine port, as crimson-llm2's
-    #              qwen3.6-vllm-direct alias does
-    #   127.0.0.1  loopback only: LiteLLM still reaches it over the compose
-    #              network, so the CONTRACT is unaffected, but nothing off-box
-    #              can skip the gateway's auth, rate limits and spend tracking
-    #
-    # Loopback is the better default for a new box; 0.0.0.0 is kept as the
-    # shipped default only because changing it would silently cut existing
-    # direct consumers.
+    # Raw engines default to loopback; gateway traffic uses the Docker network.
+    # Legacy direct consumers must opt in with an explicit *_BIND_ADDR.
     ports:
-      - "${VLLM_BIND_ADDR:-0.0.0.0}:${VLLM_PORT:-8000}:8000"
+      - "${VLLM_BIND_ADDR:-127.0.0.1}:${VLLM_PORT:-8000}:8000"
     environment: &vllm-1-env
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -195,7 +182,7 @@ services:
     container_name: vllm2
     profiles: [vllm2]
     ports:
-      - "${VLLM2_BIND_ADDR:-0.0.0.0}:${VLLM2_PORT:-8010}:8000"
+      - "${VLLM2_BIND_ADDR:-127.0.0.1}:${VLLM2_PORT:-8010}:8000"
     environment:
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -225,7 +212,7 @@ services:
     container_name: vllm3
     profiles: [vllm3]
     ports:
-      - "${VLLM3_BIND_ADDR:-0.0.0.0}:${VLLM3_PORT:-8011}:8000"
+      - "${VLLM3_BIND_ADDR:-127.0.0.1}:${VLLM3_PORT:-8011}:8000"
     environment:
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
@@ -251,7 +238,7 @@ services:
       - GIS_EXTRA_ARGS=${VLLM3_EXTRA_ARGS-}
 
   vllm-router:
-    image: nginx:1.27-alpine
+    image: nginx:1.27.5-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     container_name: vllm-router-new
     # NOT in the `vllm` profile any more. It used to start with every vLLM, so
     # a one-instance box ran an nginx that model-routes 1->1 — a pure extra hop
@@ -267,7 +254,7 @@ services:
       - vllm-router
     restart: unless-stopped
     ports:
-      - "${VLLM_ROUTER_BIND_ADDR:-0.0.0.0}:${VLLM_ROUTER_PORT:-8001}:8080"
+      - "${VLLM_ROUTER_BIND_ADDR:-127.0.0.1}:${VLLM_ROUTER_PORT:-8001}:8080"
     volumes:
       # .template + the templates dir: the image's entrypoint runs envsubst
       # over these into /etc/nginx/, which is how ${ROUTER_HOST_*} become
@@ -543,13 +530,13 @@ services:
   # TEXT EMBEDDINGS - Embedding Generation Service
   # ============================================================================
   embeddings:
-    image: ghcr.io/huggingface/text-embeddings-inference:latest
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference@sha256:af92a3852c965393cbdd111865c3a72445d2b430c7daf84269ffdb5cf178f4eb}
     container_name: embeddings
     profiles:
       - embeddings
     restart: unless-stopped
     ports:
-      - "${EMBEDDINGS_PORT:-8082}:80"
+      - "${EMBEDDINGS_BIND_ADDR:-127.0.0.1}:${EMBEDDINGS_PORT:-8082}:80"
     volumes:
       - ${HF_HOME:-./data/huggingface}:/data
     environment:
@@ -606,7 +593,7 @@ services:
       - infinity
     restart: unless-stopped
     ports:
-      - "${INFINITY_PORT:-7997}:7997"
+      - "${INFINITY_BIND_ADDR:-127.0.0.1}:${INFINITY_PORT:-7997}:7997"
     volumes:
       - ${HF_HOME:-./data/huggingface}:/app/.cache
       - ./scripts/healthprobe.py:/healthprobe.py:ro
@@ -658,7 +645,7 @@ services:
   # REDIS - Caching Layer for LiteLLM
   # ============================================================================
   redis:
-    image: redis:7-alpine
+    image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     container_name: redis
     restart: unless-stopped
     ports:
@@ -706,13 +693,14 @@ services:
     # layer silently stopped being applied. Restored here.
     #
     # `pull_policy: build` keeps `compose up` from trying to fetch the local
-    # tag from a registry, and `make setup` builds with --pull so the mutable
-    # main-latest base is re-resolved rather than served from layer cache.
+    # tag from a registry. The base digest is fixed unless explicitly overridden.
     image: gpu-inference-stack-litellm:latest
     pull_policy: build
     build:
       context: ./config/litellm
       dockerfile: Dockerfile
+      args:
+        LITELLM_BASE_IMAGE: ${LITELLM_BASE_IMAGE:-ghcr.io/berriai/litellm@sha256:1a9625b107f09f80f312ffaa3c7f7f3c0b2bf59a49ed0d5b8c3e90edcc30bb90}
     # REQUIRED, not optional. On Linux `host.docker.internal` does not exist
     # inside a container unless it is mapped — only Docker Desktop provides it
     # for free — and EIGHT of the thirteen legacy aliases in
@@ -740,7 +728,7 @@ services:
     volumes:
       - ./config/litellm:/app/config
     environment:
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-1234567890abcdef}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:?Set a non-placeholder LITELLM_MASTER_KEY}
       # UI credentials — set via `make set-passwd`, stored encrypted in .env.secrets
       - UI_USERNAME=${UI_USERNAME:-admin}
       - UI_PASSWORD=${UI_PASSWORD:-}
@@ -862,7 +850,7 @@ services:
   # POSTGRES - Database for LiteLLM
   # ============================================================================
   postgres:
-    image: postgres:15-alpine
+    image: postgres@sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81
     container_name: postgres
     restart: unless-stopped
     environment:
@@ -888,7 +876,7 @@ services:
   # PROMETHEUS - Metrics Collection
   # ============================================================================
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
     container_name: prometheus
     restart: unless-stopped
     ports:
@@ -919,7 +907,7 @@ services:
   # GRAFANA - Visualization and Dashboards
   # ============================================================================
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana@sha256:ac461fb352abc50da10a51c7d02462e9c05488f11f53f14b3ad79a8145f638a0
     container_name: grafana
     restart: unless-stopped
     ports:
@@ -953,23 +941,17 @@ services:
   # NGINX - Reverse Proxy (Optional)
   # ============================================================================
   nginx:
-    image: nginx:alpine
+    image: nginx:1.27.5-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     container_name: nginx
     profiles:
       - nginx
     restart: unless-stopped
     ports:
-      - "${NGINX_PORT:-80}:80"
-      - "${NGINX_HTTPS_PORT:-443}:443"
+      - "${NGINX_BIND_ADDR:-127.0.0.1}:${NGINX_PORT:-80}:80"
     volumes:
-      # .template + the templates dir: the image's entrypoint runs envsubst
-      # over these into /etc/nginx/, which is how ${ROUTER_HOST_*} become
-      # real hostnames before nginx parses the file.
-      - ./config/nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
-      - ./config/nginx/ssl:/etc/nginx/ssl:ro
+      - ./config/nginx/ingress.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - litellm
-      - grafana
     networks:
       - gpu-inference-net
     healthcheck:
@@ -987,7 +969,7 @@ services:
   # NODE EXPORTER - System Metrics
   # ============================================================================
   node-exporter:
-    image: prom/node-exporter:latest
+    image: prom/node-exporter@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
     container_name: node-exporter
     restart: unless-stopped
     ports:
@@ -1039,7 +1021,7 @@ services:
   # REDIS EXPORTER - Redis Metrics
   # ============================================================================
   redis-exporter:
-    image: oliver006/redis_exporter:latest
+    image: oliver006/redis_exporter@sha256:c67a432dba6b4ae30f471e3c77cf14a289133bbeeb89abb0bb03e6092efb2836
     container_name: redis-exporter
     restart: unless-stopped
     ports:

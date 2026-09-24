@@ -411,7 +411,7 @@ check_images_available() {
 
     local images=(
         "${VLLM_IMAGE:-vllm/vllm-openai:v0.23.0}"
-        "ghcr.io/berriai/litellm:main-latest"
+        "gpu-inference-stack-litellm:latest"
     )
 
     local missing=()
@@ -432,11 +432,32 @@ check_images_available() {
     return 0
 }
 
+# Reject absent/example gateway credentials without printing their contents.
+check_credentials() (
+    if [[ ! -v LITELLM_MASTER_KEY ]]; then
+        set -a
+        for f in $(./scripts/profile-files.sh 2>/dev/null); do . "$f"; done
+        set +a
+    fi
+    local key="${LITELLM_MASTER_KEY:-}"
+    case "${key,,}" in
+        *change*|*example*|*placeholder*|sk-1234567890abcdef|empty)
+            printf '  Gateway credential is a placeholder; set LITELLM_MASTER_KEY.\n'; return 2 ;;
+    esac
+    if [ "${#key}" -lt 24 ]; then
+        printf '  Set LITELLM_MASTER_KEY to a random secret of at least 24 characters.\n'
+        return 2
+    fi
+    printf '  Gateway credential configured.\n'
+)
+
 main() {
     printf "Running pre-flight checks...\n\n"
 
     local warnings=0
     local errors=0
+
+    check_credentials || return 2
 
     # Tier 2 - Critical
     check_docker_daemon || errors=$((errors + 1))

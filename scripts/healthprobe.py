@@ -12,7 +12,7 @@ broken was the only thing the probe did not touch.
 Two separate gaps, and fixing one without the other fixes nothing:
 
 1. A liveness probe cannot see a hung inference path. So this probe sends a
-   real request — one short embedding, or a one-token completion — and checks
+   real request — one short embedding, or a short completion — and checks
    the response has the shape the contract promises.
 
 2. `restart: unless-stopped` does NOT act on health. Docker's restart policy
@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import urllib.error
 import urllib.request
@@ -59,10 +60,29 @@ def _probe(url: str, payload: dict, timeout: float, expect: str) -> tuple[bool, 
         return False, f"HTTP {e.code}"        # engine is up but refusing
     except Exception as e:                    # noqa: BLE001 — timeout, reset, DNS
         return False, f"{type(e).__name__}: {e}"
-    # Shape check, not just a 200: a proxy or an error envelope can return 200
-    # with nothing useful in it, which is the same outage from a caller's seat.
-    if expect not in body or not body[expect]:
+    if not isinstance(body, dict) or not isinstance(body.get(expect), list) or not body[expect]:
         return False, f"200 but no {expect!r} in response"
+    if expect == "data":
+        inputs = payload.get("input", [])
+        count = len(inputs) if isinstance(inputs, list) else 1
+        if len(body[expect]) != count:
+            return False, "embedding count mismatch"
+        for item in body[expect]:
+            vector = item.get("embedding") if isinstance(item, dict) else None
+            if not isinstance(vector, list) or not vector:
+                return False, "empty embedding"
+            if "bge-m3" in str(payload.get("model", "")).lower() and len(vector) != 1024:
+                return False, "BGE-M3 embedding dimension must be 1024"
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in vector):
+                return False, "invalid embedding values"
+            if not any(v != 0 for v in vector):
+                return False, "zero embedding"
+    elif expect == "choices":
+        choice = body[expect][0]
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str) or not content.strip():
+            return False, "no usable chat content"
     return True, "ok"
 
 
@@ -81,7 +101,8 @@ def main() -> int:
     if args.kind == "embeddings":
         payload, expect = {"model": args.model, "input": ["health probe"]}, "data"
     else:
-        payload = {"model": args.model, "max_tokens": 1,
+        payload = {"model": args.model, "max_tokens": 8,
+                   "chat_template_kwargs": {"enable_thinking": False},
                    "messages": [{"role": "user", "content": "ping"}]}
         expect = "choices"
 
