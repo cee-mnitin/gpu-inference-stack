@@ -87,7 +87,7 @@ curl http://localhost:8002/v1/models
 
 **Test inference via LiteLLM**:
 ```bash
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 
 # Test new vLLM through router
 curl -X POST http://localhost:8080/v1/chat/completions \
@@ -237,7 +237,7 @@ sg docker -c "docker compose restart litellm"
 
 **Test all access patterns**:
 ```bash
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 
 # 1. Via LiteLLM (primary)
 curl -X POST http://localhost:8080/v1/chat/completions \
@@ -320,7 +320,7 @@ response = openai.ChatCompletion.create(
 ```python
 # Client code using LiteLLM
 openai.api_base = "http://gpu-server:8080/v1"
-openai.api_key = "sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20"
+openai.api_key = "<your-litellm-key>"
 response = openai.ChatCompletion.create(
     model="qwen3.6-vllm-router",  # Model name includes suffix now
     messages=[{"role": "user", "content": "Hello"}]

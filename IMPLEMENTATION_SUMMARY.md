@@ -339,7 +339,7 @@ GPU: 90.9GB / 97GB (93.7%) ⚠️ HIGH
 2. **Validate current state**:
    ```bash
    # Verify existing services work
-   export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+   export KEY=<your-litellm-key>
    curl -X POST http://localhost:8080/v1/chat/completions \
      -H "Authorization: Bearer $KEY" \
      -d '{"model": "qwen3.6-vllm-router", "messages": [{"role": "user", "content": "test"}]}'
@@ -367,7 +367,7 @@ nano .env
 watch -n 1 nvidia-smi
 
 # 4. Test new vLLM
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $KEY" \
   -d '{"model": "qwen3.6-new-router", "messages": [{"role": "user", "content": "test"}]}'

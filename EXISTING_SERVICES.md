@@ -294,7 +294,7 @@ curl http://localhost:11502/health
 curl http://localhost:11437/api/tags
 
 # LiteLLM (all models)
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 curl http://localhost:8080/v1/models -H "Authorization: Bearer $KEY"
 ```
 
@@ -305,7 +305,7 @@ curl http://localhost:8080/v1/models -H "Authorization: Bearer $KEY"
 ### Via LiteLLM (Unified Gateway)
 
 ```bash
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 
 # Large model via vLLM
 curl -X POST http://localhost:8080/v1/chat/completions \

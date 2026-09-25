@@ -111,13 +111,13 @@ curl http://localhost:9091/-/healthy  # Prometheus
 
 # List available models
 curl http://localhost:8080/v1/models \
-  -H "Authorization: Bearer sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20"
+  -H "Authorization: Bearer <your-litellm-key>"
 ```
 
 ### 5. Test Inference
 
 ```bash
-export LITELLM_KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export LITELLM_KEY=<your-litellm-key>
 
 # Test native Ollama model via LiteLLM
 curl -X POST http://localhost:8080/v1/chat/completions \

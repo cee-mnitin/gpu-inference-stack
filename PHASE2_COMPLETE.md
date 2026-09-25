@@ -76,7 +76,7 @@ curl -X POST http://localhost:11500/v1/chat/completions \
 
 **Via LiteLLM**:
 ```bash
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $KEY" \
@@ -381,7 +381,7 @@ curl http://localhost:11502/v1/models
 curl http://localhost:11500/health
 
 # Test via LiteLLM
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 curl http://localhost:8080/v1/models -H "Authorization: Bearer $KEY"
 
 # Check GPU

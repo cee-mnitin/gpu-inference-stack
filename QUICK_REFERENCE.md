@@ -41,10 +41,10 @@ docker compose logs -f litellm
 
 ```bash
 # Set API key
-export LITELLM_KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export LITELLM_KEY=<your-litellm-key>
 
 # Or use in requests
-curl -H "Authorization: Bearer sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20" \
+curl -H "Authorization: Bearer <your-litellm-key>" \
   http://localhost:8080/v1/models
 ```
 
@@ -55,7 +55,7 @@ curl -H "Authorization: Bearer sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de
 ### Via LiteLLM (Recommended)
 
 ```bash
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 
 # Large model (vLLM)
 curl -X POST http://localhost:8080/v1/chat/completions \
@@ -107,7 +107,7 @@ curl -X POST http://localhost:11502/v1/chat/completions \
 ### Via LiteLLM
 
 ```bash
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 curl http://localhost:8080/v1/models -H "Authorization: Bearer $KEY" | jq -r '.data[].id'
 ```
 
@@ -129,7 +129,7 @@ curl http://localhost:8080/v1/models -H "Authorization: Bearer $KEY" | jq -r '.d
 ## 🧪 Function Calling
 
 ```bash
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -328,7 +328,7 @@ docker network inspect gpu-inference-net
 ### Test All Models
 
 ```bash
-export KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export KEY=<your-litellm-key>
 
 # Get model list
 MODELS=$(curl -s http://localhost:8080/v1/models -H "Authorization: Bearer $KEY" | jq -r '.data[].id')

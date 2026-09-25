@@ -29,7 +29,7 @@ Key settings:
 - ✅ Server: crimson-llm2
 - ✅ GPU: Device 0 (97GB VRAM)
 - ✅ Ports: Configured to avoid conflicts with native services
-- ✅ LiteLLM Key: sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+- ✅ LiteLLM Key: <your-litellm-key>
 
 ### 3. Deploy
 
@@ -62,7 +62,7 @@ Expected output:
 ### Test Inference
 
 ```bash
-export LITELLM_KEY=sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20
+export LITELLM_KEY=<your-litellm-key>
 
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -167,7 +167,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8080/v1",
-    api_key="sk-f65b74f8ec1e386d7447fc87da4558c9a65e21c6abe3de360f7baea23e3c1f20"
+    api_key="<your-litellm-key>"
 )
 
 response = client.chat.completions.create(
