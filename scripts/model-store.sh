@@ -134,7 +134,17 @@ repo_dir() { printf 'models--%s' "${1//\//--}"; }
 
 # Every model the ACTIVE profile will actually ask for. Parsed from the same
 # variables compose reads, so this cannot drift from what starts.
+#
+# A model id may also be a PINNED SNAPSHOT inside the container's cache —
+# `--model-id /app/.cache/hub/models--BAAI--bge-m3/snapshots/<sha>` — which is
+# how a host holds Infinity to an exact revision. That is emitted as
+# `BAAI/bge-m3@<sha>`: the repo id the cache is keyed by, plus the revision
+# that must be present. Passed on raw, the path was looked up as a repo, never
+# found, and handed to snapshot_download(), which fails on every setup.
 needed_models() {
+    _needed_model_ids | sed -E 's#^.*/models--([^/]+)/snapshots/([^/]+)/?$#\1@\2#; /@/ s#--#/#'
+}
+_needed_model_ids() {
     local m
     [ "${ENABLE_VLLM:-false}"  = "true" ] && m="${VLLM_MODEL:-}"  && [ -n "$m" ] && printf '%s\n' "$m"
     [ "${ENABLE_VLLM2:-false}" = "true" ] && m="${VLLM2_MODEL:-}" && [ -n "$m" ] && printf '%s\n' "$m"
@@ -151,12 +161,14 @@ needed_models() {
 # files are huggingface_hub's own partial-download marker, and refs/main is what
 # resolves a repo id to a snapshot — a directory with blobs but no ref is the
 # shape an interrupted download leaves behind, and vLLM would re-download it.
-cache_complete() {
-    local d="$1"
+# With a revision, that snapshot is what must be complete; refs/main may point
+# at a newer one the host deliberately does not use.
+cache_complete() {   # cache_complete <dir> [revision]
+    local d="$1" sha="${2:-}"
     [ -d "$d" ] || return 1
-    [ -s "$d/refs/main" ] || return 1
+    [ -n "$sha" ] || [ -s "$d/refs/main" ] || return 1
     ! find "$d" -name '*.incomplete' -print -quit | grep -q . || return 1
-    local sha; sha="$(cat "$d/refs/main")"
+    [ -n "$sha" ] || sha="$(cat "$d/refs/main")"
     [ -d "$d/snapshots/$sha" ] || return 1
     # A snapshot is symlinks into ../../blobs; a dangling one means the blob was
     # never written, which `du` and a file count both report as fine.
@@ -171,10 +183,10 @@ store_enabled() {
 }
 
 # ── fetch: store -> local cache ──────────────────────────────────────────────
-fetch_one() {
-    local repo="$1" d; d="$(repo_dir "$repo")"
+fetch_one() {   # fetch_one <repo> [revision]
+    local repo="$1" rev="${2:-}" d; d="$(repo_dir "$repo")"
     local src="$MODEL_STORE_DIR/hub/$d" dst="$LOCAL_HUB/$d"
-    cache_complete "$src" || return 2          # not in the store (or half-written there)
+    cache_complete "$src" "$rev" || return 2   # not in the store (or half-written there)
     mkdir -p "$LOCAL_HUB" || return 1
     local stage="$LOCAL_HUB/.staging-$d.$$"
     rm_tree "$stage"
@@ -184,7 +196,7 @@ fetch_one() {
         printf "  ${RED}x${RST} %s: copy from the store failed\n" "$repo"
         rm_tree "$stage"; return 1
     fi
-    if ! cache_complete "$stage"; then
+    if ! cache_complete "$stage" "$rev"; then
         printf "  ${RED}x${RST} %s copied from the store but is incomplete — discarding\n" "$repo"
         rm_tree "$stage"; return 1
     fi
@@ -194,14 +206,14 @@ fetch_one() {
 }
 
 # ── publish: local cache -> store ────────────────────────────────────────────
-publish_one() {
-    local repo="$1" d; d="$(repo_dir "$repo")"
+publish_one() {   # publish_one <repo> [revision]
+    local repo="$1" rev="${2:-}" d; d="$(repo_dir "$repo")"
     local src="$LOCAL_HUB/$d" dst="$MODEL_STORE_DIR/hub/$d"
-    if ! cache_complete "$src"; then
+    if ! cache_complete "$src" "$rev"; then
         printf "  ${YEL}!${RST} %s is not completely cached locally — nothing to publish\n" "$repo"
         return 1
     fi
-    if cache_complete "$dst"; then
+    if cache_complete "$dst" "$rev"; then
         printf "  ${DIM}= %s already in the store${RST}\n" "$repo"
         return 0
     fi
@@ -215,7 +227,7 @@ publish_one() {
         printf "  ${RED}x${RST} %s: copy to the store failed — store left unchanged\n" "$repo"
         rm_tree "$stage"; return 1
     fi
-    if ! cache_complete "$stage"; then
+    if ! cache_complete "$stage" "$rev"; then
         printf "  ${RED}x${RST} %s staged to the store but is incomplete — discarding\n" "$repo"
         rm_tree "$stage"; return 1
     fi
@@ -231,7 +243,7 @@ publish_one() {
     # announce a store that does not contain the model as if it did — the next
     # box would then silently fall back to a 37-minute download with nothing in
     # the log explaining why. Only a complete destination proves the race story.
-    if cache_complete "$dst"; then
+    if cache_complete "$dst" "$rev"; then
         rm_tree "$stage"
         printf "  ${DIM}= %s was published by another host while copying${RST}\n" "$repo"
         return 0
@@ -250,25 +262,26 @@ cmd_sync() {
         printf "  ${YEL}!${RST} model store %s not present — models will come from Hugging Face\n" \
             "${MODEL_STORE_DIR:-<disabled>}"
     fi
-    local repo d rc=0
+    local repo rev d rc=0
     while read -r repo; do
         [ -n "$repo" ] || continue
+        rev=""; case "$repo" in *@*) rev="${repo#*@}"; repo="${repo%@*}" ;; esac
         d="$(repo_dir "$repo")"
-        if cache_complete "$LOCAL_HUB/$d"; then
-            printf "  ${GRN}ok${RST}   %s ${DIM}(already local)${RST}\n" "$repo"
-            store_enabled && ! cache_complete "$MODEL_STORE_DIR/hub/$d" && publish_one "$repo"
+        if cache_complete "$LOCAL_HUB/$d" "$rev"; then
+            printf "  ${GRN}ok${RST}   %s ${DIM}(already local)${RST}\n" "$repo${rev:+@$rev}"
+            store_enabled && ! cache_complete "$MODEL_STORE_DIR/hub/$d" "$rev" && publish_one "$repo" "$rev"
             continue
         fi
-        if store_enabled && cache_complete "$MODEL_STORE_DIR/hub/$d"; then
-            printf "  ${BLD}<-${RST}   %s ${DIM}(from the store)${RST}\n" "$repo"
-            if fetch_one "$repo"; then continue; fi
+        if store_enabled && cache_complete "$MODEL_STORE_DIR/hub/$d" "$rev"; then
+            printf "  ${BLD}<-${RST}   %s ${DIM}(from the store)${RST}\n" "$repo${rev:+@$rev}"
+            if fetch_one "$repo" "$rev"; then continue; fi
             printf "  ${YEL}!${RST} store copy failed, falling back to Hugging Face\n"
         fi
-        printf "  ${BLD}..${RST}   %s ${DIM}(downloading from Hugging Face)${RST}\n" "$repo"
-        if download_one "$repo"; then
-            store_enabled && publish_one "$repo"
+        printf "  ${BLD}..${RST}   %s ${DIM}(downloading from Hugging Face)${RST}\n" "$repo${rev:+@$rev}"
+        if download_one "$repo" "$rev"; then
+            store_enabled && publish_one "$repo" "$rev"
         else
-            printf "  ${RED}x${RST}   %s FAILED to download\n" "$repo"; rc=1
+            printf "  ${RED}x${RST}   %s FAILED to download\n" "$repo${rev:+@$rev}"; rc=1
         fi
     done <<< "$models"
     return $rc
@@ -277,14 +290,14 @@ cmd_sync() {
 # Download with the vLLM image's own huggingface_hub, so this script needs no
 # Python packages on the host — the boxes do not have huggingface-cli and
 # installing it on each is one more thing to drift.
-download_one() {
-    local repo="$1"
+download_one() {   # download_one <repo> [revision]
+    local repo="$1" rev="${2:-}"
     local img="${VLLM_IMAGE:-vllm/vllm-openai:v0.29.0}"
     docker run --rm \
         -v "$LOCAL_HF:/root/.cache/huggingface" \
         ${HF_TOKEN:+-e HF_TOKEN="$HF_TOKEN"} \
         --entrypoint python3 "$img" \
-        -c "from huggingface_hub import snapshot_download; snapshot_download('$repo', max_workers=8)" >/dev/null 2>&1
+        -c "from huggingface_hub import snapshot_download; snapshot_download('$repo', revision='${rev:-main}', max_workers=8)" >/dev/null 2>&1
 }
 
 cmd_status() {
@@ -294,13 +307,14 @@ cmd_status() {
                   || printf "  ${YEL}not present${RST} — every model would come from Hugging Face\n"
     printf "${BLD}local cache${RST}  %s\n\n" "$LOCAL_HUB"
     printf "  %-46s %-9s %s\n" "MODEL" "LOCAL" "STORE"
-    local repo d l s
+    local repo rev d l s
     while read -r repo; do
         [ -n "$repo" ] || continue
+        rev=""; case "$repo" in *@*) rev="${repo#*@}"; repo="${repo%@*}" ;; esac
         d="$(repo_dir "$repo")"
-        cache_complete "$LOCAL_HUB/$d" && l="${GRN}yes${RST}" || l="${DIM}no${RST}"
+        cache_complete "$LOCAL_HUB/$d" "$rev" && l="${GRN}yes${RST}" || l="${DIM}no${RST}"
         if store_enabled; then
-            cache_complete "$MODEL_STORE_DIR/hub/$d" && s="${GRN}yes${RST}" || s="${YEL}no${RST}"
+            cache_complete "$MODEL_STORE_DIR/hub/$d" "$rev" && s="${GRN}yes${RST}" || s="${YEL}no${RST}"
         else s="${DIM}-${RST}"; fi
         printf "  %-46s %-20b %b\n" "$repo" "$l" "$s"
     done <<< "$(needed_models | sort -u)"
@@ -320,6 +334,9 @@ cmd_list() {
     done
     shopt -u nullglob
 }
+
+# Sourced (by the tests) — define the functions, run nothing.
+[[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
 case "${1:-status}" in
     sync)    cmd_sync ;;
