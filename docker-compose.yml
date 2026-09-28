@@ -144,7 +144,7 @@ services:
     # Raw engines default to loopback; gateway traffic uses the Docker network.
     # Legacy direct consumers must opt in with an explicit *_BIND_ADDR.
     ports:
-      - "${VLLM_BIND_ADDR:-127.0.0.1}:${VLLM_PORT:-8000}:8000"
+      - "${VLLM_BIND_ADDR:-127.0.0.1}:${VLLM_PORT:-8100}:8000"
     environment: &vllm-1-env
       - HF_HOME=/root/.cache/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1

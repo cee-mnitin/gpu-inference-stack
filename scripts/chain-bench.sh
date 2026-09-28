@@ -105,7 +105,7 @@ STACK_KEY="${LITELLM_MASTER_KEY:-}"
 # vLLM's own metrics, for the prefix-cache and preemption deltas. Bound to
 # localhost on most profiles, so this is a best-effort read: absent, the run
 # simply omits that section rather than failing.
-VLLM_METRICS="http://localhost:${VLLM_PORT:-8000}/metrics"
+VLLM_METRICS="http://localhost:${VLLM_PORT:-8100}/metrics"
 
 mkdir -p "$OUT_DIR"
 

@@ -271,7 +271,7 @@ check: _require_profile
 	  && printf "  $(GRN)✓$(RST) nvidia container runtime works\n" \
 	  || printf "  $(YEL)!$(RST) could not run a --gpus container (nvidia-container-toolkit?)\n"; \
 	set -a; for f in $$(./scripts/profile-files.sh 2>/dev/null); do . "$$f"; done; set +a; \
-	for spec in "$${LITELLM_PORT:-8080}:gateway" "$${VLLM_PORT:-8000}:vllm" \
+	for spec in "$${LITELLM_PORT:-8080}:gateway" "$${VLLM_PORT:-8100}:vllm" \
 	            "$${INFINITY_PORT:-7997}:infinity" "$${OLLAMA_PORT:-11434}:ollama"; do \
 	  port="$${spec%%:*}"; what="$${spec##*:}"; \
 	  case "$$what" in \
@@ -369,7 +369,7 @@ urls: _require_profile
 	printf "  gateway (consumers use this)  $(BOLD)http://%s:%s$(RST)\n" "$$host" "$${LITELLM_PORT:-8080}"; \
 	printf "  $(DIM)models    http://%s:%s/v1/models$(RST)\n" "$$host" "$${LITELLM_PORT:-8080}"; \
 	printf "  $(DIM)health    http://%s:%s/health/liveliness$(RST)\n" "$$host" "$${LITELLM_PORT:-8080}"; \
-	[ "$${ENABLE_VLLM:-false}"     = "true" ] && printf "  vllm      http://%s:%s/v1\n" "$$host" "$${VLLM_PORT:-8000}" || true; \
+	[ "$${ENABLE_VLLM:-false}"     = "true" ] && printf "  vllm      http://%s:%s/v1\n" "$$host" "$${VLLM_PORT:-8100}" || true; \
 	[ "$${ENABLE_VLLM2:-false}"    = "true" ] && printf "  vllm2     http://%s:%s/v1\n" "$$host" "$${VLLM2_PORT:-8010}" || true; \
 	[ "$${ENABLE_LLAMACPP:-false}" = "true" ] && printf "  llamacpp  http://%s:%s/v1\n" "$$host" "$${LLAMACPP_PORT:-8083}" || true; \
 	[ "$${ENABLE_INFINITY:-false}" = "true" ] && printf "  infinity  http://%s:%s\n"    "$$host" "$${INFINITY_PORT:-7997}" || true; \

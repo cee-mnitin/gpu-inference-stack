@@ -67,7 +67,7 @@ get_required_ports() {
     ports="${LITELLM_PORT:-8080} ${REDIS_PORT:-6390} ${PROMETHEUS_PORT:-9090} ${GRAFANA_PORT:-3000}"
 
     # Check enabled services from environment
-    [ "${ENABLE_VLLM:-false}" = "true" ] && ports="$ports ${VLLM_PORT:-8000}"
+    [ "${ENABLE_VLLM:-false}" = "true" ] && ports="$ports ${VLLM_PORT:-8100}"
     [ "${ENABLE_VLLM2:-false}" = "true" ] && ports="$ports ${VLLM2_PORT:-8010}"
     [ "${ENABLE_VLLM3:-false}" = "true" ] && ports="$ports ${VLLM3_PORT:-8011}"
     [ "${ENABLE_OLLAMA:-false}" = "true" ] && ports="$ports ${OLLAMA_PORT:-11434}"

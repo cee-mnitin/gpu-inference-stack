@@ -403,7 +403,7 @@ if [ "${ENABLE_OLLAMA}" = "true" ]; then
 fi
 
 if [ "${ENABLE_VLLM}" = "true" ]; then
-    echo "  vLLM:        http://localhost:${VLLM_PORT:-8000}"
+    echo "  vLLM:        http://localhost:${VLLM_PORT:-8100}"
 fi
 
 if [ "${ENABLE_LLAMACPP}" = "true" ]; then

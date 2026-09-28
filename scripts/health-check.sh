@@ -90,7 +90,7 @@ fi
 
 # Check vLLM if enabled
 if [ "${ENABLE_VLLM}" = "true" ]; then
-    check_endpoint "vLLM" "http://localhost:${VLLM_PORT:-8000}/health"
+    check_endpoint "vLLM" "http://localhost:${VLLM_PORT:-8100}/health"
 fi
 
 # Check llama.cpp if enabled (the alternative chat engine)
